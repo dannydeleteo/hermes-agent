@@ -665,6 +665,11 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
                 tc_dict["extra_content"] = extra
             tool_calls.append(tc_dict)
         msg["tool_calls"] = tool_calls
+        # Preserve the current Hermes request cycle on every emitted tool
+        # call.  This is structured provenance, not model-visible prompt
+        # text, and survives transcript reordering through SessionDB.
+        from agent.request_cycle_provenance import active_cycle, stamp_assistant_tool_calls
+        stamp_assistant_tool_calls(msg, active_cycle(agent))
 
     return msg
 

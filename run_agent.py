@@ -1270,6 +1270,7 @@ class AIAgent:
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
+                from agent.request_cycle_provenance import metadata_from_message
                 self._session_db.append_message(
                     session_id=self.session_id,
                     role=role,
@@ -1283,6 +1284,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    metadata=metadata_from_message(msg),
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:

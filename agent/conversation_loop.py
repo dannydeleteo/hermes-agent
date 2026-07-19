@@ -394,7 +394,16 @@ def run_conversation(
             agent._turns_since_memory = 0
 
     # Add user message
-    user_msg = {"role": "user", "content": user_message}
+    # A user request is the only trustworthy cycle boundary.  It must be an
+    # opaque structured value because message order is not stable across the
+    # Discord/Hermes transcript bridge.
+    from agent.request_cycle_provenance import new_request_cycle
+    agent._request_cycle = new_request_cycle()
+    user_msg = {
+        "role": "user",
+        "content": user_message,
+        "hermes_request_cycle": dict(agent._request_cycle),
+    }
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
@@ -984,6 +993,11 @@ def run_conversation(
             try:
                 agent._reset_stream_delivery_tracking()
                 api_kwargs = agent._build_api_kwargs(api_messages)
+                # The local model gateway validates this structured envelope.
+                # It is never injected into prompt text and is never sent to a
+                # remote provider.
+                from agent.request_cycle_provenance import attach_gateway_cycle_envelope
+                attach_gateway_cycle_envelope(agent, api_kwargs)
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":
@@ -3148,17 +3162,17 @@ def run_conversation(
 
                     assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
                     messages.append(assistant_msg)
+                    from agent.request_cycle_provenance import tool_result_message
                     for tc in assistant_message.tool_calls:
                         if tc.function.name not in agent.valid_tool_names:
                             content = f"Tool '{tc.function.name}' does not exist. Available tools: {available}"
                         else:
                             content = "Skipped: another tool call in this turn used an invalid name. Please retry this tool call."
-                        messages.append({
-                            "role": "tool",
-                            "name": tc.function.name,
-                            "tool_call_id": tc.id,
-                            "content": content,
-                        })
+                        messages.append(tool_result_message(
+                            agent, tool_call_id=tc.id, tool_name=tc.function.name,
+                            arguments=tc.function.arguments, content=content,
+                            execution_status="refused",
+                        ))
                     continue
                 # Reset retry counter on successful tool call validation
                 agent._invalid_tool_retries = 0
@@ -3235,6 +3249,7 @@ def run_conversation(
                         
                         # Respond with tool error results for each tool call
                         invalid_names = {name for name, _ in invalid_json_args}
+                        from agent.request_cycle_provenance import tool_result_message
                         for tc in assistant_message.tool_calls:
                             if tc.function.name in invalid_names:
                                 err = next(e for n, e in invalid_json_args if n == tc.function.name)
@@ -3245,12 +3260,11 @@ def run_conversation(
                                 )
                             else:
                                 tool_result = "Skipped: other tool call in this response had invalid JSON."
-                            messages.append({
-                                "role": "tool",
-                                "name": tc.function.name,
-                                "tool_call_id": tc.id,
-                                "content": tool_result,
-                            })
+                            messages.append(tool_result_message(
+                                agent, tool_call_id=tc.id, tool_name=tc.function.name,
+                                arguments=tc.function.arguments, content=tool_result,
+                                execution_status="refused",
+                            ))
                         continue
                 
                 # Reset retry counter on successful JSON validation
@@ -3775,12 +3789,16 @@ def run_conversation(
                     for tc in msg["tool_calls"]:
                         if not tc or not isinstance(tc, dict): continue
                         if tc["id"] not in answered_ids:
-                            err_msg = {
-                                "role": "tool",
-                                "name": _ra().AIAgent._get_tool_call_name_static(tc),
-                                "tool_call_id": tc["id"],
-                                "content": f"Error executing tool: {error_msg}",
-                            }
+                            from agent.request_cycle_provenance import tool_result_message
+                            function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                            err_msg = tool_result_message(
+                                agent,
+                                tool_call_id=tc["id"],
+                                tool_name=_ra().AIAgent._get_tool_call_name_static(tc),
+                                arguments=function.get("arguments"),
+                                content=f"Error executing tool: {error_msg}",
+                                execution_status="error",
+                            )
                             messages.append(err_msg)
                 break
             

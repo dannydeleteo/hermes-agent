@@ -12150,6 +12150,11 @@ class GatewayRunner:
                     reasoning_details=msg.get("reasoning_details"),
                     codex_reasoning_items=msg.get("codex_reasoning_items"),
                     codex_message_items=msg.get("codex_message_items"),
+                    metadata={
+                        key: msg[key]
+                        for key in ("hermes_request_cycle", "hermes_tool_provenance")
+                        if isinstance(msg.get(key), dict)
+                    },
                 )
             except Exception:
                 pass  # Best-effort copy

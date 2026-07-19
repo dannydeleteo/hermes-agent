@@ -236,7 +236,8 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning_content TEXT,
     reasoning_details TEXT,
     codex_reasoning_items TEXT,
-    codex_message_items TEXT
+    codex_message_items TEXT,
+    metadata TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -1445,6 +1446,7 @@ class SessionDB:
         reasoning_details: Any = None,
         codex_reasoning_items: Any = None,
         codex_message_items: Any = None,
+        metadata: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -1465,6 +1467,7 @@ class SessionDB:
             json.dumps(codex_message_items)
             if codex_message_items else None
         )
+        metadata_json = json.dumps(metadata, sort_keys=True) if metadata else None
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
         # Multimodal content (list of parts) must be JSON-encoded: sqlite3
         # cannot bind list/dict parameters directly.
@@ -1480,8 +1483,8 @@ class SessionDB:
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -1497,6 +1500,7 @@ class SessionDB:
                     reasoning_details_json,
                     codex_items_json,
                     codex_message_items_json,
+                    metadata_json,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -1557,14 +1561,20 @@ class SessionDB:
                 codex_message_items_json = (
                     json.dumps(codex_message_items) if codex_message_items else None
                 )
+                metadata = {
+                    key: msg[key]
+                    for key in ("hermes_request_cycle", "hermes_tool_provenance")
+                    if isinstance(msg.get(key), dict)
+                }
+                metadata_json = json.dumps(metadata, sort_keys=True) if metadata else None
                 tool_calls_json = json.dumps(tool_calls) if tool_calls else None
 
                 conn.execute(
                     """INSERT INTO messages (session_id, role, content, tool_call_id,
                        tool_calls, tool_name, timestamp, token_count, finish_reason,
                        reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                       codex_message_items)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       codex_message_items, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         role,
@@ -1580,6 +1590,7 @@ class SessionDB:
                         reasoning_details_json,
                         codex_items_json,
                         codex_message_items_json,
+                        metadata_json,
                     ),
                 )
                 total_messages += 1
@@ -1615,6 +1626,12 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
                     msg["tool_calls"] = []
+            if msg.get("metadata"):
+                try:
+                    msg["metadata"] = json.loads(msg["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize message metadata, falling back to {}")
+                    msg["metadata"] = {}
             result.append(msg)
         return result
 
@@ -1897,7 +1914,7 @@ class SessionDB:
             rows = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items "
+                "codex_reasoning_items, codex_message_items, metadata "
                 f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY id",
                 tuple(session_ids),
             ).fetchall()
@@ -1912,12 +1929,20 @@ class SessionDB:
                 msg["tool_call_id"] = row["tool_call_id"]
             if row["tool_name"]:
                 msg["tool_name"] = row["tool_name"]
+                msg["name"] = row["tool_name"]
             if row["tool_calls"]:
                 try:
                     msg["tool_calls"] = json.loads(row["tool_calls"])
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
                     msg["tool_calls"] = []
+            if row["metadata"]:
+                try:
+                    metadata = json.loads(row["metadata"])
+                    if isinstance(metadata, dict):
+                        msg.update(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize message metadata in conversation replay")
             # Restore reasoning fields on assistant messages so providers
             # that replay reasoning (OpenRouter, OpenAI, Nous) receive
             # coherent multi-turn reasoning context.
@@ -3190,4 +3215,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

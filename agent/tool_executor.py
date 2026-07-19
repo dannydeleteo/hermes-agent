@@ -73,13 +73,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # ── Pre-flight: interrupt check ──────────────────────────────────
     if agent._interrupt_requested:
         print(f"{agent.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
+        from agent.request_cycle_provenance import tool_result_message
         for tc in tool_calls:
-            messages.append({
-                "role": "tool",
-                "name": tc.function.name,
-                "content": f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
-                "tool_call_id": tc.id,
-            })
+            messages.append(tool_result_message(
+                agent, tool_call_id=tc.id, tool_name=tc.function.name,
+                arguments=tc.function.arguments,
+                content=f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
+                execution_status="cancelled",
+            ))
         return
 
     # ── Parse args + pre-execution bookkeeping ───────────────────────
@@ -443,12 +444,12 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # image tool result never poisons canonical session history.
         # String results pass through unchanged.
         _tool_content = agent._tool_result_content_for_active_model(name, function_result)
-        tool_msg = {
-            "role": "tool",
-            "name": name,
-            "content": _tool_content,
-            "tool_call_id": tc.id,
-        }
+        from agent.request_cycle_provenance import tool_result_message
+        tool_msg = tool_result_message(
+            agent, tool_call_id=tc.id, tool_name=name, arguments=args,
+            content=_tool_content,
+            execution_status="blocked" if blocked else "executed",
+        )
         messages.append(tool_msg)
 
         # ── Per-tool /steer drain ───────────────────────────────────
@@ -468,6 +469,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # so the steer marker is never truncated. See steer() for details.
     if num_tools > 0:
         agent._apply_pending_steer_to_tool_results(messages, num_tools)
+        from agent.request_cycle_provenance import refresh_tool_result_checksum
+        for tool_msg in messages[-num_tools:]:
+            refresh_tool_result_checksum(tool_msg)
 
 
 
@@ -481,14 +485,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             remaining_calls = assistant_message.tool_calls[i-1:]
             if remaining_calls:
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
+            from agent.request_cycle_provenance import tool_result_message
             for skipped_tc in remaining_calls:
                 skipped_name = skipped_tc.function.name
-                skip_msg = {
-                    "role": "tool",
-                    "name": skipped_name,
-                    "content": f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
-                    "tool_call_id": skipped_tc.id,
-                }
+                skip_msg = tool_result_message(
+                    agent, tool_call_id=skipped_tc.id, tool_name=skipped_name,
+                    arguments=skipped_tc.function.arguments,
+                    content=f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
+                    execution_status="cancelled",
+                )
                 messages.append(skip_msg)
             break
 
@@ -864,12 +869,12 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Unwrap _multimodal dicts to an OpenAI-style content list
         # (see parallel path for rationale). String results pass through.
         _tool_content = agent._tool_result_content_for_active_model(function_name, function_result)
-        tool_msg = {
-            "role": "tool",
-            "name": function_name,
-            "content": _tool_content,
-            "tool_call_id": tool_call.id
-        }
+        from agent.request_cycle_provenance import tool_result_message
+        tool_msg = tool_result_message(
+            agent, tool_call_id=tool_call.id, tool_name=function_name,
+            arguments=function_args, content=_tool_content,
+            execution_status="blocked" if _execution_blocked else "executed",
+        )
         messages.append(tool_msg)
 
         # ── Per-tool /steer drain ───────────────────────────────────
@@ -890,14 +895,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         if agent._interrupt_requested and i < len(assistant_message.tool_calls):
             remaining = len(assistant_message.tool_calls) - i
             agent._vprint(f"{agent.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
+            from agent.request_cycle_provenance import tool_result_message
             for skipped_tc in assistant_message.tool_calls[i:]:
                 skipped_name = skipped_tc.function.name
-                skip_msg = {
-                    "role": "tool",
-                    "name": skipped_name,
-                    "content": f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
-                    "tool_call_id": skipped_tc.id
-                }
+                skip_msg = tool_result_message(
+                    agent, tool_call_id=skipped_tc.id, tool_name=skipped_name,
+                    arguments=skipped_tc.function.arguments,
+                    content=f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
+                    execution_status="cancelled",
+                )
                 messages.append(skip_msg)
             break
 
@@ -914,6 +920,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
     # applied to sequential execution as well.
     if num_tools_seq > 0:
         agent._apply_pending_steer_to_tool_results(messages, num_tools_seq)
+        from agent.request_cycle_provenance import refresh_tool_result_checksum
+        for tool_msg in messages[-num_tools_seq:]:
+            refresh_tool_result_checksum(tool_msg)
 
 
 

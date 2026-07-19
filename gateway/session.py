@@ -1276,6 +1276,11 @@ class SessionStore:
                     reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,
                     codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
                     codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
+                    metadata={
+                        key: message[key]
+                        for key in ("hermes_request_cycle", "hermes_tool_provenance")
+                        if isinstance(message.get(key), dict)
+                    },
                 )
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
