@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 import sqlite3
+import hashlib
+import hmac
+import os
+import secrets
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,19 +15,29 @@ import pytest
 from agent.request_cycle_provenance import (
     REQUEST_CYCLE_SCHEMA,
     attach_gateway_cycle_envelope,
+    canonical_envelope_bytes,
+    checksum,
+    envelope_issues,
+    generate_key_file,
+    load_hmac_key,
     metadata_from_message,
     new_request_cycle,
     refresh_tool_result_checksum,
     SIGNATURE_PREFIX,
+    sign_envelope,
     stamp_assistant_tool_calls,
     tool_result_message,
+    verify_envelope_signature,
 )
 from hermes_state import SCHEMA_SQL, SessionDB
 
 
 @pytest.fixture(autouse=True)
-def cycle_hmac_key(monkeypatch):
-    monkeypatch.setenv("HERMES_REQUEST_CYCLE_HMAC_KEY", "unit-test-request-cycle-key")
+def cycle_hmac_key(monkeypatch, tmp_path):
+    path = tmp_path / "request-cycle.key"
+    path.write_text(secrets.token_hex(32))
+    path.chmod(0o600)
+    monkeypatch.setenv("HERMES_REQUEST_CYCLE_HMAC_KEY_FILE", str(path))
 
 
 def test_cycle_stamps_user_call_and_receipt_without_prompt_text():
@@ -117,3 +132,93 @@ def test_existing_sessiondb_is_reconciled_with_provenance_metadata_column(tmp_pa
         assert "metadata" in columns
     finally:
         db.close()
+
+
+def _fixed_cycle():
+    return {
+        "schema": REQUEST_CYCLE_SCHEMA,
+        "request_cycle_id": "rc_0123456789abcdef0123456789abcdef",
+        "created_at": "2026-07-20T01:02:03Z",
+    }
+
+
+def test_canonical_contract_is_exact_unambiguous_and_rejects_unknown_fields():
+    cycle = _fixed_cycle()
+    expected = (
+        b'{"created_at":"2026-07-20T01:02:03Z",'
+        b'"request_cycle_id":"rc_0123456789abcdef0123456789abcdef",'
+        b'"schema":"hermes.request-cycle.v1"}'
+    )
+    assert canonical_envelope_bytes(cycle) == expected
+    sign_envelope(cycle)
+    assert cycle["signature"].startswith(SIGNATURE_PREFIX) and len(cycle["signature"]) == len(SIGNATURE_PREFIX) + 64
+    assert checksum('{"b":2,"a":1}', parse_json_string=True) == checksum({"a": 1, "b": 2})
+    assert checksum('{"a":1,"a":2}', parse_json_string=True) != checksum({"a": 2})
+    assert envelope_issues({**cycle, "unexpected": True}, allow_missing_signature=True) == ("UNKNOWN_FIELD",)
+    assert envelope_issues({**cycle, "created_at": "2026-07-20T01:02:03+00:00"}, allow_missing_signature=True) == ("INVALID_TIMESTAMP",)
+
+
+def test_key_lifecycle_is_strict_and_never_prints_key_material(monkeypatch, tmp_path: Path, capsys):
+    parent = tmp_path / "key-parent"
+    parent.mkdir(mode=0o700)
+    key_path = parent / "request-cycle.key"
+    monkeypatch.setenv("HERMES_REQUEST_CYCLE_HMAC_KEY_FILE", str(key_path))
+    generate_key_file(key_path)
+    mode = stat.S_IMODE(key_path.stat().st_mode)
+    key, issue = load_hmac_key()
+    assert mode == 0o600 and issue is None and key is not None and len(key) == 32
+    fingerprint = hashlib.sha256(key).hexdigest()[:16]
+    assert len(fingerprint) == 16
+    assert capsys.readouterr().out == capsys.readouterr().err == ""
+
+    key_path.chmod(0o644)
+    assert load_hmac_key()[1] == "KEY_MODE_MISMATCH"
+    key_path.chmod(0o600)
+    key_path.write_text("not-a-key")
+    assert load_hmac_key()[1] == "KEY_MALFORMED"
+    key_path.unlink()
+    os.symlink(parent / "elsewhere", key_path)
+    assert load_hmac_key()[1] == "KEY_SYMLINK"
+    key_path.unlink()
+    linked_parent = tmp_path / "linked-parent"
+    os.symlink(parent, linked_parent)
+    monkeypatch.setenv("HERMES_REQUEST_CYCLE_HMAC_KEY_FILE", str(linked_parent / "request-cycle.key"))
+    assert load_hmac_key()[1] == "KEY_PARENT_SYMLINK"
+
+
+def test_rotation_invalidates_old_receipts_fail_closed(monkeypatch, tmp_path: Path):
+    key_path = tmp_path / "request-cycle.key"
+    key_path.write_text(secrets.token_hex(32))
+    key_path.chmod(0o600)
+    monkeypatch.setenv("HERMES_REQUEST_CYCLE_HMAC_KEY_FILE", str(key_path))
+    cycle = new_request_cycle()
+    assert verify_envelope_signature(cycle)[0]
+    old_signature = cycle["signature"]
+    key_path.write_text(secrets.token_hex(32))
+    key_path.chmod(0o600)
+    ok, issue = verify_envelope_signature(cycle)
+    assert not ok and issue == "SIGNATURE_MISMATCH" and cycle["signature"] == old_signature
+
+
+def test_secure_generation_uses_a_nonrepeating_256_bit_key(tmp_path: Path):
+    parent = tmp_path / "keys"
+    parent.mkdir(mode=0o700)
+    first, second = parent / "first.key", parent / "second.key"
+    generate_key_file(first)
+    generate_key_file(second)
+    first_key, first_issue = _load_key_at(first)
+    second_key, second_issue = _load_key_at(second)
+    assert first_issue is second_issue is None
+    assert first_key != second_key and len(first_key) == len(second_key) == 32
+
+
+def _load_key_at(path: Path):
+    old = os.environ.get("HERMES_REQUEST_CYCLE_HMAC_KEY_FILE")
+    os.environ["HERMES_REQUEST_CYCLE_HMAC_KEY_FILE"] = str(path)
+    try:
+        return load_hmac_key()
+    finally:
+        if old is None:
+            os.environ.pop("HERMES_REQUEST_CYCLE_HMAC_KEY_FILE", None)
+        else:
+            os.environ["HERMES_REQUEST_CYCLE_HMAC_KEY_FILE"] = old
