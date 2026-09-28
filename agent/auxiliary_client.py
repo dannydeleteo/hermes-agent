@@ -41,6 +41,10 @@ from agent.codex_headers import (
 )
 from agent.codex_runtime import _codex_event_has_content
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
+from agent.local_model_admission import (
+    guarded_client_kwargs, guarded_client_needs_rebuild, raise_if_admission_error,
+    terminal_admission_error, validate_local_api_mode,
+)
 
 # `openai.OpenAI` is imported lazily (~240 ms cold); `OpenAI` below is a proxy
 # so in-module calls, `auxiliary_client.OpenAI` reads and
@@ -182,6 +186,9 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     if _aux_probe_active():
         # Availability probe: resolved credentials/base_url are the answer.
         return _AuxProbeClientStub(api_key=api_key, base_url=base_url)
+    guarded = guarded_client_kwargs({"api_key": api_key, "base_url": base_url, **kwargs})
+    if guarded is not None:
+        return OpenAI(**guarded)
     kwargs = {**_openai_http_client_kwargs(base_url), **kwargs}
     _apply_required_codex_headers(kwargs, access_token=api_key, base_url=base_url)
     # Hermes owns aux retry/fallback policy; the SDK default (max_retries=2) would triple
@@ -194,6 +201,13 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     # via kwargs.
     kwargs.setdefault("max_retries", 0)
     return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
+
+
+def _raise_auxiliary_admission_error(exc: BaseException, client: Any) -> None:
+    raise_if_admission_error(exc)
+    error = terminal_admission_error(exc, client)
+    if error is not None:
+        raise error from exc
 
 
 # Interrupt protection for atomic aux tasks: a compression summary killed by an ordinary
@@ -2551,8 +2565,9 @@ def _relay_aux_call_scope(args: tuple, kwargs: dict):
     })
     try:
         yield
-    except BaseException:
+    except BaseException as exc:
         _fail_relay_auxiliary_call()
+        raise_if_admission_error(exc)
         raise
     finally:
         _RELAY_AUX_CALL_CONTEXT.reset(token)
@@ -2652,7 +2667,15 @@ async def _relay_async_completion(
 
     kwargs = prepare_chat_messages(client, kwargs)
     # Async twin of the seam default above (#98466).
-    callback = create or (lambda request: _acreate_with_progress(client, request))
+    provider_callback = create or (lambda request: _acreate_with_progress(client, request))
+
+    async def callback(request):
+        try:
+            return await provider_callback(request)
+        except Exception as exc:
+            _raise_auxiliary_admission_error(exc, client)
+            raise
+
     route = _relay_auxiliary_metadata(provider=provider, api_mode=api_mode)
     if route is None:
         return await callback(kwargs)
@@ -2879,6 +2902,7 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
         return None, None
     if custom_base.lower().startswith(_CODEX_AUX_BASE_URL.lower()):
         return None, None
+    validate_local_api_mode(custom_base, custom_mode)
     model = _read_main_model_for_aux() or "gpt-4o-mini"
     logger.debug("Auxiliary client: custom endpoint (%s, api_mode=%s)", model, custom_mode or "chat_completions")
     _clean_base, _dq = _extract_url_query_params(custom_base)
@@ -4143,6 +4167,7 @@ def _call_fallback_candidate_sync(
     try:
         return _send_recovering(fb_client, fb_kwargs, destination)
     except Exception as fb_err:
+        _raise_auxiliary_admission_error(fb_err, fb_client)
         if not _is_auth_error(fb_err):
             capacity = fallback_candidate_unavailable_reason(fb_err)
             if capacity is None:
@@ -4159,6 +4184,7 @@ def _call_fallback_candidate_sync(
             try:
                 return _send_recovering(*retry)
             except Exception as retry_err:
+                _raise_auxiliary_admission_error(retry_err, retry[0])
                 if not _is_auth_error(retry_err) and fallback_candidate_unavailable_reason(retry_err) is None:
                     raise
         _quarantine_fallback_candidate(
@@ -4193,6 +4219,7 @@ async def _call_fallback_candidate_async(
     try:
         return await _send_recovering(fb_client, fb_kwargs, destination)
     except Exception as fb_err:
+        _raise_auxiliary_admission_error(fb_err, fb_client)
         if not _is_auth_error(fb_err):
             capacity = fallback_candidate_unavailable_reason(fb_err)
             if capacity is None:
@@ -4209,6 +4236,7 @@ async def _call_fallback_candidate_async(
             try:
                 return await _send_recovering(*retry)
             except Exception as retry_err:
+                _raise_auxiliary_admission_error(retry_err, retry[0])
                 if not _is_auth_error(retry_err) and fallback_candidate_unavailable_reason(retry_err) is None:
                     raise
         _quarantine_fallback_candidate(
@@ -4311,7 +4339,8 @@ def _try_main_agent_model_fallback(
         return None, None, ""
     try:
         client, resolved_model = resolve_provider_client(provider=main_provider, model=main_model)
-    except Exception:
+    except Exception as exc:
+        raise_if_admission_error(exc)
         client, resolved_model = None, None
     if client is None:
         return None, None, ""
@@ -4407,7 +4436,8 @@ def _try_configured_fallback_chain(
         label = f"fallback_chain[{i}]({fb_provider})"
         try:
             fb_client, resolved_model = _resolve_fallback_entry(entry)
-        except Exception:
+        except Exception as exc:
+            raise_if_admission_error(exc)
             fb_client, resolved_model = None, None
         if fb_client is not None:
             too_small = _context_too_small(
@@ -4499,6 +4529,7 @@ def _try_main_fallback_chain(
         try:
             fb_client, resolved_model = _resolve_fallback_entry(entry)
         except Exception as exc:
+            raise_if_admission_error(exc)
             logger.debug("Auxiliary %s: main fallback %s failed to resolve: %s", task or "call", label, exc)
             fb_client, resolved_model = None, None
         if fb_client is not None:
@@ -4732,7 +4763,9 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     if headers:
         async_kwargs["default_headers"] = headers
     _apply_required_codex_headers(async_kwargs, access_token=sync_client.api_key, base_url=sync_base_url)
-    async_kwargs = {**_openai_http_client_kwargs(sync_base_url, async_mode=True), **async_kwargs}
+    guarded = guarded_client_kwargs(async_kwargs, async_mode=True)
+    async_kwargs = guarded if guarded is not None else {
+        **_openai_http_client_kwargs(sync_base_url, async_mode=True), **async_kwargs}
     # Hermes owns the auxiliary retry/timeout budget; disable SDK-internal retries.
     # See #54465.
     async_kwargs.setdefault("max_retries", 0)
@@ -4926,6 +4959,7 @@ def _wrap_transport(req: _ResolveRequest, client_obj: Any, final_model_str: str,
     _oc_mode, _oc_base = opencode_transport(req.provider, final_model_str, base_url_str)
     if _oc_mode:
         req, base_url_str = req._replace(api_mode=_oc_mode), _oc_base
+    validate_local_api_mode(base_url_str, req.api_mode)
     needs_codex = not (
         isinstance(client_obj, CodexAuxiliaryClient) or req.raw_codex
     ) and (
@@ -4944,6 +4978,7 @@ def _wrap_transport(req: _ResolveRequest, client_obj: Any, final_model_str: str,
     # A profile that declares the Messages wire (commandcode-anthropic) is on it whatever the URL
     # looks like; the same declaration gates ``_reasoning_config`` in _build_call_kwargs.
     api_mode = req.api_mode or _profile_declared_messages_wire(req.provider)
+    validate_local_api_mode(base_url_str, api_mode)
     return _maybe_wrap_anthropic(client_obj, final_model_str, api_key_str, base_url_str, api_mode)
 
 
@@ -5188,6 +5223,7 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
     _oc_mode, _oc_base = opencode_transport(provider, final_model, custom_base)
     if _oc_mode:
         entry_api_mode, custom_base = _oc_mode, _oc_base
+    validate_local_api_mode(custom_base, entry_api_mode)
     logger.debug("resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
                  provider, final_model, entry_api_mode or "chat_completions")
     # anthropic_messages: route via AnthropicAuxiliaryClient (mirrors _try_custom_endpoint);
@@ -5995,14 +6031,16 @@ def _get_cached_client(
     with _client_cache_lock:
         if cache_key in _client_cache:
             cached_client, cached_default, cached_loop = _client_cache[cache_key]
+            retired = guarded_client_needs_rebuild(cached_client)
             loop_ok = not async_mode or (
                 cached_loop is not None and cached_loop is current_loop and not cached_loop.is_closed()
             )
-            if loop_ok:
+            if loop_ok and not retired:
                 return cached_client, _compat_model(cached_client, model, cached_default)
-            # Stale async entry — evict. Only a closed owner loop may be awaited here; a live
-            # foreign loop stays force-neutered.
-            _close_cached_client(cached_client, close_async=cached_loop is not None and cached_loop.is_closed())
+            # A retired admission client may still own worker cleanup: only drop its reference.
+            # Other stale async entries retain their existing loop-owned teardown.
+            if not retired:
+                _close_cached_client(cached_client, close_async=cached_loop is not None and cached_loop.is_closed())
             del _client_cache[cache_key]
     # Build outside the lock. For pool-backed providers derive the key from the pool entry:
     # resolve_api_key_provider_credentials prefers env vars, which would bypass pool rotation
@@ -6025,6 +6063,9 @@ def _get_cached_client(
         return client, model or default_model
     if client is not None:
         with _client_cache_lock:
+            cached_entry = _client_cache.get(cache_key)
+            if cached_entry is not None and guarded_client_needs_rebuild(cached_entry[0]):
+                del _client_cache[cache_key]  # Never close another caller's retired transport.
             if cache_key not in _client_cache:
                 # FIFO safety-belt eviction. Do NOT close evicted clients: another caller may be
                 # mid-request on one; refcount/GC handles it.
@@ -6956,6 +6997,7 @@ def _create_with_progress(
     try:
         return _create_with_progress_once(client, kwargs, task, force_stream=force_stream)
     except Exception as exc:
+        _raise_auxiliary_admission_error(exc, client)
         affordable = _affordable_max_tokens_from_error(exc)
         if affordable is None:
             raise
@@ -7015,6 +7057,7 @@ def _create_with_progress_once(
     try:
         chunks = client.chat.completions.create(**stream_kwargs)
     except Exception as exc:
+        _raise_auxiliary_admission_error(exc, client)
         # Genuine provider failures aren't streaming's fault — surface unchanged so the
         # recovery chains see the same error as a plain call.
         if (force_stream or _is_transient_transport_error(exc) or _is_auth_error(exc)
@@ -7241,6 +7284,7 @@ async def _acreate_with_progress(
     try:
         chunks = await client.chat.completions.create(**stream_kwargs)
     except Exception as exc:
+        _raise_auxiliary_admission_error(exc, client)
         # Only a rejected stream NEGOTIATION falls back to a plain call (mirrors the sync wrapper); a
         # failure mid-consumption below reaches the classified recovery ladder instead of silently
         # re-sending the whole prompt non-streaming.
@@ -7976,10 +8020,11 @@ def _plan_aux_call(
     return req, retry_kwargs, candidate_kwargs
 
 
-def _should_retry_same_provider(task: Optional[str], exc: Exception, tag: str) -> bool:
+def _should_retry_same_provider(task: Optional[str], exc: Exception, tag: str, client: Any = None) -> bool:
     """True when ``exc`` is a transient transport blip worth a same-provider retry; critical-path
     tasks skip it on a full-budget timeout (``_should_skip_same_provider_retry``) and go straight
     to fallback."""
+    _raise_auxiliary_admission_error(exc, client)
     if not _is_transient_transport_error(exc):
         return False
     if _should_skip_same_provider_retry(task, exc):
@@ -8006,6 +8051,7 @@ def _start_recovery_ladder(
     task: Optional[str], async_mode: bool, route_info: Optional[Dict[str, str]],
 ):
     """Build the recovery-ladder generator for a failed primary request."""
+    _raise_auxiliary_admission_error(first_err, req.client)
     return _aux_recovery_ladder(
         first_err, client=req.client, kwargs=req.kwargs, task=task, async_mode=async_mode,
         base_info=req.base_info, resolved_provider=req.resolved_provider,
@@ -8078,7 +8124,7 @@ def _call_llm_impl(
         try:
             return _primary(provider=request_provider, base_url=req.base_info)
         except Exception as transient_err:
-            if not _should_retry_same_provider(task, transient_err, ""):
+            if not _should_retry_same_provider(task, transient_err, "", client):
                 raise
             _max_transient_retries = _transient_retry_count()
             _last_transient = transient_err
@@ -8236,7 +8282,7 @@ async def _async_call_llm_impl(
             return await _primary(provider=request_provider, base_url=req.base_info)
         except Exception as transient_err:
             # The async Codex adapter wraps the sync stream via to_thread: same TimeoutError here.
-            if not _should_retry_same_provider(task, transient_err, " (async)"):
+            if not _should_retry_same_provider(task, transient_err, " (async)", client):
                 raise
             logger.info("Auxiliary %s (async): transient transport error; retrying "
                         "once on the same provider before fallback: %s", task or "call", transient_err)

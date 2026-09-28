@@ -1954,12 +1954,17 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     )
     _validate_proxy_env_urls()
     _validate_base_url(client_kwargs.get("base_url"))
+    from agent.local_model_admission import guarded_client_kwargs, validate_local_api_mode
+    validate_local_api_mode(client_kwargs.get("base_url", ""), getattr(agent, "api_mode", None))
+    local_kwargs = guarded_client_kwargs(client_kwargs)
+    if local_kwargs is not None:
+        client_kwargs = local_kwargs
     # Provider-supplied client (registration seam): a provider whose wire protocol is not
     # OpenAI-over-HTTP supplies its own client from ProviderProfile.create_client(). Consulted
     # before the built-in ladder so a profile registered from ~/.hermes/plugins/ or a pip entry
     # point can ship a transport without editing this function (what makes an out-of-tree ACP
     # provider possible). None (the default) falls through, so existing providers are unaffected.
-    provider_client = _provider_supplied_client(agent, client_kwargs)
+    provider_client = _provider_supplied_client(agent, client_kwargs) if local_kwargs is None else None
     if provider_client is not None:
         _ra().logger.info(
             "%s client created from provider profile (%s, shared=%s) %s",
@@ -1967,7 +1972,7 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         )
         return provider_client
     from agent.auxiliary_client import _GEMINI_NATIVE_PROVIDER_NAMES
-    if agent.provider in _GEMINI_NATIVE_PROVIDER_NAMES:
+    if local_kwargs is None and agent.provider in _GEMINI_NATIVE_PROVIDER_NAMES:
         client = _gemini_native_client(agent, client_kwargs, httpx_verify, reason=reason, shared=shared)
         if client is not None:
             return client

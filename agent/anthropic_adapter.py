@@ -361,6 +361,8 @@ def _base_client_kwargs(base_url, timeout) -> tuple[str, Dict[str, Any]]:
     Retry-After and double-retries inside our loop. Any trailing ``/v1`` is stripped because the
     SDK appends ``/v1/messages``. Azure's ``api-version`` goes through ``default_query`` so the
     base_url is not corrupted into ``/anthropic?api-version=.../v1/messages``."""
+    from agent.local_model_admission import validate_local_api_mode
+    validate_local_api_mode(base_url, "anthropic_messages")
     kwargs: Dict[str, Any] = {"timeout": _client_timeout(timeout), "max_retries": 0}
     normalized = re.sub(r"/v1/?$", "", _normalize_base_url_text(base_url).rstrip("/"))
     if normalized:
