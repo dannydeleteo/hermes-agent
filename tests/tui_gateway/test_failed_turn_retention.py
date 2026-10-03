@@ -233,6 +233,50 @@ def test_returned_error_without_reason_omits_no_frame(emits, turn_env):
     assert payload["error_surface"]["code"] == "unknown"
 
 
+@pytest.mark.parametrize(
+    "reason", ["local_model_busy", "local_model_recovery_required", "local_model_unavailable"]
+)
+def test_local_failure_survives_desktop_and_mailbox(emits, turn_env, tmp_path, reason):
+    from hermes_cli.active_sessions import try_acquire_active_session
+    from hermes_state import SessionDB
+    from tools import bot_live_delivery as mailbox
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session(session_id="session-key", source="cli")
+    db.set_session_title("session-key", "Bot Chat")
+    lease, refusal = try_acquire_active_session(
+        session_id="session-key", surface="desktop", config={}, registry_home=tmp_path,
+        metadata={"live_session_id": "sid", "bot_live_delivery_consumer": True})
+    assert refusal is None and lease is not None
+    try:
+        owner = mailbox.find_canonical_live_owner(tmp_path)
+        queued = mailbox.deliver_to_live_owner(tmp_path, owner, "one bounded task")
+        agent = types.SimpleNamespace(
+            session_id="session-key", provider="custom", model="local-model",
+            run_conversation=lambda *a, **k: {
+                "final_response": "Local request not admitted.", "error": "Local request not admitted.",
+                "failed": True, "completed": False,
+                "failure_reason": reason, "failure_retryable": False,
+            }, clear_interrupt=lambda: None)
+        session = _session(agent=agent, profile_home=str(tmp_path), active_session_lease=lease)
+        server._start_inflight_turn(session, "one bounded task")
+        assert server._poll_bot_live_delivery_once("sid", session) is True
+        receipt = mailbox.read_delivery_result(tmp_path, queued["delivery_id"])
+        assert receipt["status"] == "failed"
+        assert receipt.get("reason") == reason
+        assert receipt.get("failure_reason") == reason
+        assert receipt.get("failure_retryable") is False
+        assert mailbox.claim_pending_delivery(tmp_path, owner) is None
+        payload = _events(emits, "message.complete")[0]
+        assert payload["error_surface"]["code"] == reason
+        assert payload["error_surface"]["layer"] == "gateway"
+        assert payload["error_surface"]["retryable"] is False
+        assert server._inflight_snapshot(session)["error_surface"] == payload["error_surface"]
+    finally:
+        lease.release()
+        db.close()
+
+
 def test_completed_turn_still_clears_inflight(emits, turn_env):
     agent = types.SimpleNamespace(
         session_id="session-key",

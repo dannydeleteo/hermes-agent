@@ -276,12 +276,19 @@ def claim_pending_delivery(
 def complete_delivery(
     profile_home: Path | str, delivery_id: str, *, status: str,
     reply: str = "", error: str = "", reason: str = "",
+    failure_reason: str | None = None, failure_retryable: bool | None = None,
 ) -> dict[str, Any]:
     """Persist an immutable terminal receipt; duplicate identical completion is safe."""
     key = _delivery_id(delivery_id)
     if status not in _TERMINAL:
         raise ValueError("invalid terminal delivery status")
     outcome = dict(status=status, reply=reply, error=error, reason=reason)
+    # Additive metadata: old callers can repeat a receipt without dropping its
+    # typed verdict. Supplied metadata participates in the immutable comparison.
+    if isinstance(failure_reason, str) and failure_reason:
+        outcome["failure_reason"] = failure_reason
+    if isinstance(failure_retryable, bool):
+        outcome["failure_retryable"] = failure_retryable
     with _locked(profile_home) as root:
         path = root / f"{key}.json"
         record = _read(path)

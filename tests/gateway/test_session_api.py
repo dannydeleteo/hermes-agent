@@ -284,6 +284,38 @@ async def test_fork_session_writes_branched_from_marker(adapter, session_db):
     assert cfg["_branched_from"] == source_id
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("failure", "attempts"), [
+    ({"failure_reason": "local_model_busy", "failure_retryable": False}, 1),
+    ({"failure_reason": "local_model_recovery_required", "failure_retryable": False}, 1),
+    ({"failure_reason": "local_model_unavailable", "failure_retryable": False}, 1),
+    ({"failure_reason": "server_error", "failure_retryable": False}, 1),
+    ({"failure_reason": "context_overflow", "failure_retryable": False,
+      "compression_exhausted": True, "error": "context compression exhausted"}, 1),
+    ({"failure_reason": "context_overflow", "error": "context length exceeded"}, 2),
+    ({"failure_reason": "server_error"}, 2),
+])
+async def test_session_chat_respects_retry_veto_and_keeps_legacy_recovery(adapter, session_db, failure, attempts):
+    session_id = session_db.create_session("retry-policy", "api_server")
+    agent = MagicMock()
+    agent.session_id = session_id
+    agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+    agent.run_conversation.side_effect = [
+        {"failed": True, "completed": False, "error": "HTTP 503: unavailable",
+         "final_response": "Request could not finish.", **failure},
+        {"completed": True, "final_response": "Recovered."},
+    ]
+    with patch.object(adapter, "_create_agent", return_value=agent) as create:
+        async with TestClient(TestServer(_create_session_app(adapter))) as cli:
+            response = await cli.post(f"/api/sessions/{session_id}/chat", json={"message": "bounded task"})
+            assert response.status == 200
+            body = await response.json()
+    assert agent.run_conversation.call_count == attempts
+    assert all(call.kwargs["session_id"] == session_id for call in create.call_args_list)
+    assert body["session_id"] == session_id
+    assert body["message"]["content"] == ("Recovered." if attempts == 2 else "Request could not finish.")
+
+
+@pytest.mark.asyncio
 async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeypatch):
     """API-server request sessions should reach tools and terminal subprocess env."""
     monkeypatch.setenv("HERMES_SESSION_ID", "stale-session")
