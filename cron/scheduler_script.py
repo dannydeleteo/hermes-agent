@@ -64,8 +64,25 @@ def _timeout_from_env_or_config(
     return None
 
 
-def _get_script_timeout() -> int:
-    """Resolve cron pre-run script timeout from module/env/config with a safe default."""
+def _get_script_timeout(job_id: Optional[str] = None) -> int:
+    """Resolve a profile-local job budget, then the unchanged shared timeout policy."""
+    if job_id:
+        try:
+            cfg = _sched.load_config() or {}
+            cron_cfg = cfg.get("cron", {}) if isinstance(cfg, dict) else {}
+            overrides = cron_cfg.get("script_timeout_seconds_by_job", {})
+            if not isinstance(overrides, dict):
+                raise ValueError("expected a job-id mapping")
+            if job_id in overrides:
+                raw = overrides[job_id]
+                timeout = None if isinstance(raw, bool) else _positive_int(raw)
+                if timeout is None:
+                    raise ValueError("expected positive seconds")
+                return timeout
+        except Exception:
+            logger.warning(
+                "Invalid cron.script_timeout_seconds_by_job entry for job %r; "
+                "using shared script timeout", job_id)
     if _sched._SCRIPT_TIMEOUT != _sched._DEFAULT_SCRIPT_TIMEOUT:
         try:
             timeout = _positive_int(_sched._SCRIPT_TIMEOUT)
@@ -432,6 +449,7 @@ def _script_argv(
 def _run_job_script(
     script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, interpreter: Optional[str] = None,
+    *, job_id: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Execute a cron job's script and return ``(success, output)``; on failure *output* is the
     error message for the LLM to report. Env goes through ``build_subprocess_env`` (SECURITY.md
@@ -442,12 +460,13 @@ def _run_job_script(
     Absolute and ~-prefixed paths are also validated to ensure they stay within the scripts dir. workdir:
     Optional absolute path to use as the script's cwd. When set, the subprocess runs in this directory
     instead of the scripts-dir parent. See #69396. interpreter: the job's optional Python for
-    ``.py`` scripts (#8714).
+    ``.py`` scripts (#8714). job_id: owning job identity for a profile-local primary-script
+    budget; callers without an identity keep the shared timeout policy.
     """
     path, err = _resolve_script_path(script_path)
     if path is None:
         return False, err
-    script_timeout = _get_script_timeout()
+    script_timeout = _get_script_timeout(job_id) if job_id else _get_script_timeout()
     try:
         argv, env_overlay, err = _script_argv(path, interpreter)
         if argv is None:
@@ -560,7 +579,7 @@ def _run_job_script_with_claim_heartbeat(
     dispatched job, never re-read, so a stale runner cannot extend a replacement owner's claim."""
     def run() -> tuple[bool, str]:
         return _run_job_script(script_path, workdir=workdir, cancel_event=cancel_event,
-                               interpreter=job.get("interpreter"))
+                               interpreter=job.get("interpreter"), job_id=job.get("id"))
 
     schedule = job.get("schedule")
     claim = job.get("run_claim")

@@ -837,6 +837,28 @@ cron:
 
 Or set the `HERMES_CRON_SCRIPT_TIMEOUT` environment variable. The resolution order is: env var → config.yaml → 3600s default.
 
+To give one job a different primary-script limit without changing the other jobs,
+use its exact job ID in that job's **owning profile's** config:
+
+```yaml
+cron:
+  script_timeout_seconds: 660
+  script_timeout_seconds_by_job:
+    "your-job-id": 1500  # 25 minutes for this job only
+```
+
+A valid matching entry takes precedence over the shared module override, scoped
+environment variable, and scalar config setting. Without a match (or without a
+job identity), the existing shared precedence is unchanged. Values are positive,
+finite seconds converted to whole seconds; booleans, invalid values, and values
+that convert to zero fall back to the shared limit with a warning. This setting
+never enables an unlimited run. It applies to `script` for both script-only and
+pre-agent jobs, not to `monitor_script`, `monitor_url`, or the agent inactivity
+budget. The existing timeout/cancellation process-tree cleanup still applies.
+This does not extend the separate stale-owner recovery window for external
+workers (derived from the shared timeout and inactivity budget, with a two-hour
+floor). Do not use a longer per-job limit as a substitute for that recovery policy.
+
 Cron also bounds post-run session and agent-resource cleanup. This happens after the LLM turn returns, so it is separate from the inactivity timeout. The default is 10 seconds per cleanup operation. If a storage or client finalizer stops returning, the scheduler logs an error, releases the job's in-flight guard, and allows later runs to dispatch instead of skipping that job forever.
 
 ```yaml

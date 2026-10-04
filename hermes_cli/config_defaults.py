@@ -1858,6 +1858,9 @@ DEFAULT_CONFIG = {
         # Timeout (seconds) for a no-agent cron script. Env: HERMES_CRON_SCRIPT_TIMEOUT. Keep in
         # sync with cron.scheduler._DEFAULT_SCRIPT_TIMEOUT.
         "script_timeout_seconds": 3600,
+        # Profile-local primary-script budgets by exact job id; valid entries take precedence
+        # over the shared module/env/config timeout. No change to monitor-script budgets.
+        "script_timeout_seconds_by_job": {},
         # Timeout (seconds) for SessionDB() init inside cron jobs: state.db open/migrate has no
         # timeout of its own against a wedged sqlite3.connect, and an unbounded hang wedges the
         # job's dispatch guard forever. Env: HERMES_CRON_SESSION_DB_TIMEOUT. 0 = unlimited.

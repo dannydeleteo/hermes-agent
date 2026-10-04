@@ -16,10 +16,18 @@ import pytest
 def test_script_termination_reaps_descendants(tmp_path, monkeypatch, trigger, topology):
     import os
     import psutil
+    from pathlib import Path
     from cron import scheduler, scheduler_script
+    from hermes_cli.config import atomic_config_write
 
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(scheduler_script, "_get_script_timeout", lambda: 3 if trigger == "timeout" else 60)
+    monkeypatch.setattr(scheduler, "_SCRIPT_TIMEOUT", scheduler._DEFAULT_SCRIPT_TIMEOUT)
+    atomic_config_write(tmp_path / "config.yaml", {"cron": {
+        "script_timeout_seconds": 660,
+        "script_timeout_seconds_by_job": {"bounded-script": 3 if trigger == "timeout" else 60},
+    }})
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     ready = tmp_path / "child.pid"
@@ -36,7 +44,8 @@ def test_script_termination_reaps_descendants(tmp_path, monkeypatch, trigger, to
     cancel, results, errors = threading.Event(), [], []
     def run():
         try:
-            results.append(scheduler_script._run_job_script(str(script), workdir=str(tmp_path), cancel_event=cancel))
+            results.append(scheduler_script._run_job_script_with_claim_heartbeat(
+                {"id": "bounded-script"}, str(script), workdir=str(tmp_path), cancel_event=cancel))
         except BaseException as exc:
             errors.append(exc)
     def live(pid):
