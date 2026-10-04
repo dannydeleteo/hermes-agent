@@ -43,6 +43,12 @@ class _Admission:
                     proof = NativeChatCompletionProof(body["model"])
                 else:
                     proof = CompletionProof(body["model"], body.get("stream", False))
+                if self.policy.require_capacity_qualification:
+                    # Serialization and an available-RAM snapshot cannot qualify a
+                    # backend's actual context, parallel slots or loading settings.
+                    # No supported deployment verifier exists yet. Refuse before
+                    # acquiring ownership: nothing was dispatched to settle/recover.
+                    raise LocalModelAdmissionError("capacity_unqualified")
                 lease = self.policy.acquire()
                 return _Ownership(self, lease, proof)
             except Exception as exc:

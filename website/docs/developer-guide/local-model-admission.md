@@ -37,6 +37,8 @@ local_model_admission:
       protocol: ollama-openai-v1
       # Optional, separately reviewed native nonstream /api/chat callers only:
       allow_native_chat: false
+      # Fail closed pending a supported deployment/capacity verifier (see below).
+      require_capacity_qualification: true
       models:
         - "<exact served model tag>"
 ```
@@ -48,6 +50,45 @@ chat (`stream: false` explicitly); it cannot send OpenAI completions, Responses,
 other native endpoints, or requests for unenrolled models. Missing/disabled
 enrollment raises a terminal refusal, never an unguarded native client. This
 does not change ordinary SDK clients' absent-policy behavior.
+
+### Required capacity qualification
+
+`require_capacity_qualification: true` currently **refuses every request** on
+that enrolled route with `local_model_capacity_unqualified`, before acquiring
+the shared slot or dispatching inference. There is no supported positive
+qualification implementation yet. This is an explicit safety stop, not a
+working memory allocator, automated RAM check or promise of a smaller model.
+It preserves the nonretryable reason through native/auxiliary clients, API runs
+and desktop mailbox delivery; it does not select a cloud fallback.
+
+Omitting this flag or setting it to boolean `false` retains the existing
+serialization-only behavior, **without RAM protection**. Other value types
+are invalid rather than silently disabling the requirement. An absent/disabled
+whole admission section still preserves existing routing. As with all enrollment,
+activation requires coordinated restart; cached clients do not adopt this flag
+live. No route is enabled or reconfigured by adding this source feature.
+
+Why not accept a number of free bytes as proof? Ollama's effective loading
+configuration includes parallel slots, context, batch size, cache settings,
+placement and inherited model components. Its metadata endpoints do not fully
+establish those settings for the running process. The existing Hermes managed
+runtime owns llama-server, not this Ollama process. A future capacity verifier
+must bind a reviewed full memory envelope to the actual backend process
+incarnation, hardware, exact model manifest, inherited configuration and bounded
+workload, then compare fresh available memory under the shared slot. A settings
+file hash, empty model list or matching displayed context alone is insufficient.
+
+On Ollama 0.34.3 the OpenAI chat-completion conversion does not forward
+`options.num_ctx`; that API needs a model-configured context parameter. The
+separate native API can honor its request options but still needs the same
+deployment/capacity proof. See the pinned
+[OpenAI conversion](https://github.com/ollama/ollama/blob/v0.34.3/openai/openai.go),
+[loading scheduler](https://github.com/ollama/ollama/blob/v0.34.3/server/sched.go),
+[option resolution](https://github.com/ollama/ollama/blob/v0.34.3/server/routes.go)
+and [context configuration](https://docs.ollama.com/api/openai-compatibility#setting-the-local-context-size).
+Even a qualified preflight is cooperative admission, not an OS memory reservation
+against other applications or unenrolled callers. Backend recovery remains a
+separate reviewed operation; this refusal neither acquires nor clears a marker.
 
 All participating profiles/applications must use the **same machine-user lane
 root**, not separate profile directories. The coordinator must implement the
