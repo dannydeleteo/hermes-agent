@@ -3711,10 +3711,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 # Terminal status and flags come from the result (interrupted -> cancelled,
                 # unfinished -> failed); a late steer rides along as ``pending_steer`` for replay.
                 status, fields = _api_runs.terminal_run_status(result if is_dict else {})
-                await queue.put(_event_payload("assistant.completed", {
+                # A worker may finish before its Future is wrapped, so awaiting it need not
+                # yield. Queue terminal events behind its already-scheduled progress callbacks.
+                events.loop.call_soon(queue.put_nowait, _event_payload("assistant.completed", {
                     "session_id": effective_session_id, "message_id": message_id,
                     "content": final_response, **fields, "runtime": effective_runtime}))
-                await queue.put(_event_payload(f"run.{status}", {
+                events.loop.call_soon(queue.put_nowait, _event_payload(f"run.{status}", {
                     "session_id": effective_session_id, "message_id": message_id, **fields,
                     "messages": turn_messages, "usage": usage, "runtime": effective_runtime}))
                 self._set_run_status(
@@ -3730,13 +3732,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 logger.exception("[api_server] session chat stream failed")
                 self._set_run_status(
                     run_id, "failed", error=_redact_api_error_text(exc), last_event="run.failed")
-                await queue.put(_event_payload("error", {"message": _redact_api_error_text(exc)}))
+                events.loop.call_soon(queue.put_nowait, _event_payload(
+                    "error", {"message": _redact_api_error_text(exc)}))
             finally:
                 self._active_run_agents.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
                 self._release_run_owner_if_forgotten(run_id)
-                await queue.put(_event_payload("done", {}))
-                await queue.put(None)
+                events.loop.call_soon(queue.put_nowait, _event_payload("done", {}))
+                events.loop.call_soon(queue.put_nowait, None)
 
         # NOT in _active_run_tasks: _run_agent already counts this turn for the shutdown drain.
         task = asyncio.create_task(_run_and_signal())
