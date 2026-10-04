@@ -60,9 +60,10 @@ _pool_probe_cache: tuple[float, "tuple[int, bool | None] | None"] | None = None
 _DEVICE_LINE_RE = re.compile(r"CUDA\d+:.*\((\d+)\s*MiB,\s*\d+\s*MiB free\)\s*$")
 
 
-def _stdout(*argv: str) -> str:
+def _stdout(*argv: str, check: bool = False) -> str:
     return subprocess.run(
-        list(argv), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
+        list(argv), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+        check=check,
     ).stdout
 
 
@@ -112,6 +113,42 @@ def _linux_ram_from_meminfo(text: str) -> tuple[int, int] | None:
         return None
 
 
+def _macos_available_bytes(total: int, text: str) -> int:
+    """Read one complete vm_stat snapshot; unknown availability grants no memory.
+
+    Apple's snapshot prints free_count minus speculative_count, with speculative
+    reported separately. Purgeable is not another disjoint page queue to add.
+    Source: https://github.com/apple-oss-distributions/system_cmds/blob/main/vm_stat/vm_stat.c
+    """
+    lines = text.splitlines()
+    if not lines:
+        return 0
+    header = re.fullmatch(r"Mach Virtual Memory Statistics: \(page size of ([0-9]+) bytes\)",
+                          lines[0])
+    if header is None:
+        return 0
+    page = int(header.group(1))
+    # Qualified Mac kernel page sizes; do not accept arbitrary powers of two.
+    # https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/arm/vm_param.h
+    # https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/i386/vm_param.h
+    if page not in {4096, 16384}:
+        return 0
+    keys = {"Pages free", "Pages inactive", "Pages speculative"}
+    fields: dict[str, int] = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        if name not in keys:
+            continue
+        count = re.fullmatch(r"\s*([0-9]+)\.\s*", value)
+        if name in fields or count is None:
+            return 0
+        fields[name] = int(count.group(1))
+    if fields.keys() != keys:
+        return 0
+    available = sum(fields.values()) * page
+    return available if 0 <= available <= total else 0
+
+
 def _ram_bytes() -> tuple[int, int]:
     """(total, available) physical memory, cross-platform stdlib."""
     try:
@@ -133,21 +170,14 @@ def _ram_bytes() -> tuple[int, int]:
         if sys.platform == "darwin":
             # macOS getconf has no _PHYS_PAGES/_AVPHYS_PAGES (exit 64) — the POSIX branch would
             # return (0, 0) and every model would read unavailable. sysctl is the platform truth.
-            total = int(_stdout("/usr/sbin/sysctl", "-n", "hw.memsize").strip() or 0)
+            total = int(_stdout("/usr/sbin/sysctl", "-n", "hw.memsize", check=True).strip() or 0)
             if total <= 0:
                 return 0, 0
-            avail = total // 2  # conservative fallback
-            with suppress(OSError, ValueError):
-                out = _stdout("/usr/bin/vm_stat")
-                page_m = re.search(r"page size of (\d+)", out)
-                page = int(page_m.group(1)) if page_m else 16384
-                # free + inactive + purgeable ≈ reclaimable-on-demand; the speculative pool is
-                # dropped by the OS under pressure too.
-                pages = sum(int(m.group(1)) for key in (
-                    "Pages free", "Pages inactive", "Pages purgeable", "Pages speculative")
-                    if (m := re.search(rf"{key}:\s+(\d+)\.", out)))
-                if pages > 0:
-                    avail = pages * page
+            # Half of total is not a conservative fallback on a nearly full Mac.
+            # Keep known capacity for catalog planning, but never invent live room.
+            avail = 0
+            with suppress(OSError, ValueError, subprocess.SubprocessError):
+                avail = _macos_available_bytes(total, _stdout("/usr/bin/vm_stat", check=True))
             return total, avail
         if sys.platform.startswith("linux"):
             meminfo = _linux_meminfo_text()
@@ -162,7 +192,7 @@ def _ram_bytes() -> tuple[int, int]:
         with suppress(OSError, ValueError):
             avail = int(_stdout("getconf", "_AVPHYS_PAGES") or 0) * page or avail
         return total, avail
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return 0, 0
 
 

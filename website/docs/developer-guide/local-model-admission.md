@@ -116,6 +116,22 @@ client, preserve typed failure/retry metadata, and prove its physical request
 lifetime. Source support alone is not deployment, rendered UI acceptance, a RAM
 budget or an approved backend-recovery operation.
 
+### Memory readings are not admission
+
+The existing `hermes_cli.local_runtime.hardware.probe_budget()` supplies a live
+hardware estimate. On macOS, missing, malformed, impossible or failed memory
+readings contribute zero available bytes; a genuine zero is not replaced with
+half of physical RAM. A complete `vm_stat` snapshot must declare a supported
+4 KiB or 16 KiB page size. Free, inactive and speculative queues are counted
+once; the separate purgeable count is not added again.
+
+This is only a probe correction. `planning=True` intentionally prices total
+capacity for the catalog. Existing managed-runtime launch/growth paths still
+use capacity and do not receive a live UMA launch budget. Direct Ollama requests
+do not consume this probe at all. Neither the corrected reading nor a unit-level
+physics refusal qualifies a model/context combination or closes the RAM gate.
+Do not clear a recovery marker or start a model on that evidence alone.
+
 ## Verification and compatibility
 
 The source was exercised with OpenAI Python 2.24.0 and HTTPX 0.28.1. The accepted
