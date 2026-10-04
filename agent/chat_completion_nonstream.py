@@ -16,6 +16,9 @@ class _NonStreamRequest:
         self.api_kwargs = api_kwargs
         self.result = {"response": None, "error": None}
         self.clients = h._RequestClientRegistry(agent)
+        # The live agent can switch models while this worker survives. Keep this
+        # request's identity even after the abort registry relinquishes its client.
+        self._admission_client = getattr(agent, "client", None)
         # Request-local cancel flag: agent._interrupt_requested is cleared at turn
         # boundaries but this daemon worker can outlive the turn, so it must know THIS
         # request was force-closed and not surface the transport error as a bug (#6600).
@@ -62,6 +65,7 @@ class _NonStreamRequest:
             client = self.agent._create_request_anthropic_client(reason=reason)
         else:
             client = self.agent._create_request_openai_client(reason=reason, api_kwargs=self.api_kwargs)
+        self._admission_client = client
         return self.clients.set_client(client, kind=kind)
 
     def _call(self):
@@ -312,6 +316,10 @@ class _NonStreamRequest:
             if agent._interrupt_requested:
                 self._interrupt(elapsed)
         if self.result["error"] is not None:
+            from agent.local_model_admission import terminal_admission_error
+            local_error = terminal_admission_error(self.result["error"], self._admission_client)
+            if local_error is not None:
+                raise local_error from self.result["error"]
             raise self.result["error"]
         # Success — the provider proved responsive: clear the breaker (#58962).
         if self.result["response"] is not None:

@@ -3685,6 +3685,11 @@ class _StreamingCall(StreamingWaitMonitor):
         ``result["error"]`` set (unless our own interrupt force-closed the
         socket). Runs inside the ``except`` so ``logger.exception`` works."""
         import httpx as _httpx
+        from agent.local_model_admission import terminal_admission_error
+        local_error = terminal_admission_error(e, getattr(self.agent, "client", None))
+        if local_error is not None:
+            self.result["error"] = local_error
+            return False
         # Our own interrupt force-close: no retry/fallback/"reconnecting" (the
         # poll loop raises InterruptedError).
         if self._request_cancelled["value"]:
@@ -4100,6 +4105,10 @@ class _StreamingCall(StreamingWaitMonitor):
         if self.agent._interrupt_requested:  # worker returned early before the monitor saw the flag
             raise InterruptedError("Agent interrupted during streaming API call (post-worker)")
         if self.result["error"] is not None:
+            from agent.local_model_admission import terminal_admission_error
+            local_error = terminal_admission_error(self.result["error"], getattr(self.agent, "client", None))
+            if local_error is not None:
+                raise local_error
             if self.deltas_were_sent["yes"]:
                 return self._partial_stream_stub()
             raise self.result["error"]

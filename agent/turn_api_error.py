@@ -79,6 +79,22 @@ def handle_api_error(
     if agent.thinking_callback:
         agent.thinking_callback("")
 
+    from agent.local_model_admission import terminal_admission_error
+    local_error = terminal_admission_error(api_error, getattr(agent, "client", None))
+    if local_error is not None:
+        agent._invoke_api_request_error_hook(
+            task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
+            api_call_count=api_call_count, api_start_time=api_start_time, api_kwargs=api_kwargs,
+            error_type=type(local_error).__name__, error_message=str(local_error), status_code=None,
+            retry_count=retry_count, max_retries=max_retries, retryable=False,
+            reason="local_model_" + local_error.code,
+        )
+        return _verdict("return", {
+            "final_response": str(local_error), "messages": messages, "api_calls": api_call_count,
+            "completed": False, "failed": True, "error": str(local_error),
+            "failure_reason": "local_model_" + local_error.code, "failure_retryable": False,
+        })
+
     _recovered, active_system_prompt = recover_before_classification(
         agent, api_error, messages=messages, api_messages=api_messages, api_kwargs=api_kwargs,
         active_system_prompt=active_system_prompt,
