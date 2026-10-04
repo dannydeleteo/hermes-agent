@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1353,7 +1354,15 @@ async def test_session_stream_records_reply_text_for_post_disconnect_recovery(
 
 
 @pytest.mark.asyncio
-async def test_interim_commentary_reaches_session_sse_and_responses_stream(adapter, session_db, monkeypatch):
+@pytest.mark.parametrize("worker_finishes_before_await", [False, True])
+@pytest.mark.parametrize("endpoint,worker_fails", [
+    pytest.param("session", False, id="session-completed"),
+    pytest.param("session", True, id="session-failed"),
+    pytest.param("responses", False, id="responses-completed"),
+])
+async def test_interim_commentary_reaches_session_sse_and_responses_stream(
+    adapter, session_db, monkeypatch, worker_finishes_before_await, endpoint, worker_fails
+):
     """Codex commentary / mid-turn assistant text is a typed ``assistant.commentary`` event on the
     session SSE endpoint and a ``phase: commentary`` message item on /v1/responses, never part of
     the final answer; ``display.interim_assistant_messages: false`` installs no callback (#67580)."""
@@ -1363,6 +1372,7 @@ async def test_interim_commentary_reaches_session_sse_and_responses_stream(adapt
 
     def fake_create_agent(**kwargs):
         interim = kwargs["interim_assistant_callback"]
+        progress = kwargs["tool_progress_callback"]
 
         class FakeAgent:
             provider, model = "openai-codex", "gpt-5"
@@ -1370,17 +1380,44 @@ async def test_interim_commentary_reaches_session_sse_and_responses_stream(adapt
 
             def run_conversation(self, **_kw):
                 interim("Checking the docs first.", already_streamed=False)
+                progress("tool.started", "read_file", "docs", {})
+                progress("tool.completed", "read_file", "docs", {})
+                if worker_fails:
+                    raise RuntimeError("worker failed")
                 return {"final_response": "Done.", "messages": [], "api_calls": 1}
 
         return FakeAgent()
 
     app = _create_session_app(adapter)
     app.router.add_post("/v1/responses", adapter._handle_responses)
-    with patch.object(adapter, "_create_agent", side_effect=fake_create_agent):
+
+    class CompletedWorkerExecutor(ThreadPoolExecutor):
+        def submit(self, fn, /, *args, **kwargs):
+            future = super().submit(fn, *args, **kwargs)
+            # Force a real worker to finish before asyncio wraps its future. The
+            # worker's call_soon_threadsafe events are still pending on the loop.
+            if worker_finishes_before_await:
+                future.exception(timeout=5)
+            return future
+
+    loop = asyncio.get_running_loop()
+    run_in_executor = loop.run_in_executor
+    with CompletedWorkerExecutor(max_workers=1) as executor, patch.object(
+        adapter, "_create_agent", side_effect=fake_create_agent
+    ), monkeypatch.context() as worker_patch:
+        worker_patch.setattr(
+            loop, "run_in_executor",
+            lambda selected, fn, *args: run_in_executor(selected or executor, fn, *args),
+        )
         async with TestClient(TestServer(app)) as cli:
-            sse = await (await cli.post(f"/api/sessions/{session_id}/chat/stream", json={"message": "go"})).text()
-            responses = await (await cli.post(
-                "/v1/responses", json={"model": "hermes-agent", "input": "go", "stream": True})).text()
+            if endpoint == "session":
+                response = await cli.post(
+                    f"/api/sessions/{session_id}/chat/stream", json={"message": "go"})
+            else:
+                response = await cli.post(
+                    "/v1/responses", json={"model": "hermes-agent", "input": "go", "stream": True})
+            assert response.status == 200
+            body = await response.text()
 
     def _events(body):
         out = []
@@ -1392,14 +1429,27 @@ async def test_interim_commentary_reaches_session_sse_and_responses_stream(adapt
                 out.append((name, _json.loads(data)))
         return out
 
-    sse_events = _events(sse)
-    commentary = [d for n, d in sse_events if n == "assistant.commentary"]
-    assert [(d["text"], d["already_streamed"]) for d in commentary] == [("Checking the docs first.", False)]
-    assert next(d for n, d in sse_events if n == "assistant.completed")["content"] == "Done."
-
-    done_items = [d["item"] for n, d in _events(responses) if n == "response.output_item.done"]
-    assert [(i.get("phase"), i["content"][0]["text"]) for i in done_items if i["type"] == "message"] == [
-        ("commentary", "Checking the docs first."), (None, "Done.")]
+    if endpoint == "session":
+        sse_events = _events(body)
+        commentary = [d for n, d in sse_events if n == "assistant.commentary"]
+        assert [(d["text"], d["already_streamed"]) for d in commentary] == [("Checking the docs first.", False)]
+        if worker_fails:
+            assert next(d for n, d in sse_events if n == "error")["message"] == "worker failed"
+            terminal_events = ["error", "done"]
+        else:
+            assert next(d for n, d in sse_events if n == "assistant.completed")["content"] == "Done."
+            terminal_events = ["assistant.completed", "run.completed", "done"]
+        assert [n for n, _ in sse_events] == [
+            "run.started", "message.started", "assistant.commentary", "tool.started",
+            "tool.completed", *terminal_events,
+        ]
+        assert [d["seq"] for _, d in sse_events] == list(range(1, len(sse_events) + 1))
+        assert {d["session_id"] for _, d in sse_events} == {session_id}
+        assert len({d["run_id"] for _, d in sse_events}) == 1
+    else:
+        done_items = [d["item"] for n, d in _events(body) if n == "response.output_item.done"]
+        assert [(i.get("phase"), i["content"][0]["text"]) for i in done_items if i["type"] == "message"] == [
+            ("commentary", "Checking the docs first."), (None, "Done.")]
 
     # Display gate: the callback is dropped before it reaches AIAgent, like the gateway/TUI.
     _patch_api_server_runtime(monkeypatch)
