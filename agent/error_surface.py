@@ -38,7 +38,7 @@ _REASON_TO_LAYER = {
     "auth": LAYER_AUTH, "auth_permanent": LAYER_AUTH, "billing": LAYER_BILLING, "billing_unverified": LAYER_BILLING,
     "loop_error": LAYER_GATEWAY, "interpreter_shutdown": LAYER_GATEWAY, "session_busy": LAYER_GATEWAY,
     "local_model_busy": LAYER_GATEWAY, "local_model_recovery_required": LAYER_GATEWAY,
-    "local_model_unavailable": LAYER_GATEWAY,
+    "local_model_unavailable": LAYER_GATEWAY, "local_model_capacity_unqualified": LAYER_GATEWAY,
     "truncated": LAYER_PROVIDER, "empty_response": LAYER_PROVIDER, "invalid_response": LAYER_PROVIDER,
     "context_overflow": LAYER_PROVIDER,  # a bigger-window model IS the fix, so Switch provider applies
 }
@@ -58,6 +58,7 @@ _NON_RETRYABLE_REASONS = {
     "provider_policy_blocked", "model_not_found", "format_error", "ssl_cert_verification",
     "context_overflow", "interpreter_shutdown", "upstream_blocked",
     "local_model_busy", "local_model_recovery_required", "local_model_unavailable",
+    "local_model_capacity_unqualified",
 }
 
 # Providers whose base_url is user-supplied rather than a known vendor.

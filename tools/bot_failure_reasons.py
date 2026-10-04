@@ -22,6 +22,7 @@ CANCELLED = "cancelled"
 LOCAL_MODEL_BUSY = "local_model_busy"
 LOCAL_MODEL_RECOVERY_REQUIRED = "local_model_recovery_required"
 LOCAL_MODEL_UNAVAILABLE = "local_model_unavailable"
+LOCAL_MODEL_CAPACITY_UNQUALIFIED = "local_model_capacity_unqualified"
 
 # agent-side
 PROVIDER_AUTH_OR_ACCESS = "provider_auth_or_access"
@@ -41,6 +42,7 @@ ALL_REASONS = frozenset({
     PROVIDER_SERVER_ERROR, CONTEXT_OVERFLOW, MISSING_CONFIG, MODEL_UNAVAILABLE,
     TARGET_SCOPE_UNRESOLVED, UNKNOWN,
     LOCAL_MODEL_BUSY, LOCAL_MODEL_RECOVERY_REQUIRED, LOCAL_MODEL_UNAVAILABLE,
+    LOCAL_MODEL_CAPACITY_UNQUALIFIED,
 })
 
 #: Reasons a supervisor may retry automatically without human intervention.

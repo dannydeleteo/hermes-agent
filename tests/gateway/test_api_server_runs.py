@@ -1113,7 +1113,8 @@ class TestSteerRun:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("live_owner", [False, True])
 @pytest.mark.parametrize(
-    "reason", ["local_model_busy", "local_model_recovery_required", "local_model_unavailable"]
+    "reason", ["local_model_busy", "local_model_recovery_required", "local_model_unavailable",
+               "local_model_capacity_unqualified"]
 )
 async def test_failure_metadata_survives_events_status_and_restart(tmp_path, reason, live_owner):
     """Clients must not guess whether a failed local request can be retried."""

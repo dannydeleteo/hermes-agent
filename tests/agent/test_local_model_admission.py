@@ -316,6 +316,53 @@ def test_enrolled_ollama_route_cannot_be_rebuilt_as_unguarded_messages_client(ad
         build_anthropic_client(api_key="fixture", base_url=URL)
 
 
+@pytest.mark.parametrize("wire", ["sync", "async", "stream", "native"])
+def test_required_capacity_refuses_before_ownership_or_dispatch(admission, monkeypatch, wire):
+    module, lane, cfg = admission
+    route = cfg["local_model_admission"]["routes"][0]
+    route.update(require_capacity_qualification=True, allow_native_chat=True)
+    dispatched = []
+
+    def send(request):
+        dispatched.append(request)
+        return wire_response()
+
+    monkeypatch.setattr(httpx, "HTTPTransport", lambda **_: httpx.MockTransport(send))
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_: httpx.MockTransport(send))
+
+    async def async_request():
+        options = module.guarded_client_kwargs({"api_key": "test", "base_url": URL}, async_mode=True)
+        async with openai.AsyncOpenAI(**options) as sdk:
+            await sdk.chat.completions.create(model=MODEL, messages=[])
+
+    with pytest.raises(Exception) as caught:
+        if wire == "async":
+            asyncio.run(async_request())
+        else:
+            options = module.guarded_client_kwargs(
+                {"api_key": "test", "base_url": URL}, native_chat=wire == "native")
+            with openai.OpenAI(**options) as sdk:
+                if wire == "native":
+                    sdk._client.post(URL.removesuffix("/v1") + "/api/chat", json={
+                        "model": MODEL, "messages": [], "stream": False})
+                else:
+                    sdk.chat.completions.create(model=MODEL, messages=[], stream=wire == "stream")
+    error = module.find_admission_error(caught.value)
+    assert error is not None and error.code == "capacity_unqualified"
+    assert "No new request was sent" in str(error)
+    assert dispatched == [] and lane.acquisitions == 0
+    assert not lane.held and not lane.uncertain
+
+
+@pytest.mark.parametrize("value", [None, "true", "false", 0, 1, {}])
+def test_capacity_requirement_is_never_coerced_to_disabled(admission, value):
+    module, lane, cfg = admission
+    cfg["local_model_admission"]["routes"][0]["require_capacity_qualification"] = value
+    with pytest.raises(module.LocalModelAdmissionError):
+        module.guarded_client_kwargs({"api_key": "test", "base_url": URL})
+    assert lane.acquisitions == 0
+
+
 @pytest.mark.parametrize("async_mode", [False, True])
 @pytest.mark.parametrize("reason", [None, "stop"])
 def test_cr_delimited_done_cannot_hide_failed_raw_stream(admission, monkeypatch, async_mode, reason):

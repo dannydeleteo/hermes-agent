@@ -288,6 +288,7 @@ async def test_fork_session_writes_branched_from_marker(adapter, session_db):
     ({"failure_reason": "local_model_busy", "failure_retryable": False}, 1),
     ({"failure_reason": "local_model_recovery_required", "failure_retryable": False}, 1),
     ({"failure_reason": "local_model_unavailable", "failure_retryable": False}, 1),
+    ({"failure_reason": "local_model_capacity_unqualified", "failure_retryable": False}, 1),
     ({"failure_reason": "server_error", "failure_retryable": False}, 1),
     ({"failure_reason": "context_overflow", "failure_retryable": False,
       "compression_exhausted": True, "error": "context compression exhausted"}, 1),

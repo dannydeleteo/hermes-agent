@@ -131,9 +131,15 @@ def local_route(tmp_path, monkeypatch):
     ("deadline", "progress"), ("deadline", "async_progress"),
     ("configuration", "sync"), ("configuration", "async"),
     ("unsupported_mode", "sync"), ("unsupported_mode", "async"),
+    ("capacity", "sync"), ("capacity", "async"), ("capacity", "stream"),
+    ("capacity", "progress"), ("capacity", "async_progress"),
 ])
 def test_local_auxiliary_failure_never_retries_or_dispatches_to_cloud(local_route, failure, mode):
     route = local_route
+    if failure == "capacity":
+        import hermes_yaml as yaml
+        route.config["local_model_admission"]["routes"][0]["require_capacity_qualification"] = True
+        (route.profile / "config.yaml").write_text(yaml.safe_dump(route.config))
     if failure == "unsupported_mode":
         import hermes_yaml as yaml
         route.config["custom_providers"].append({"name": "local-messages", "model": "local-model:tag",
@@ -163,8 +169,9 @@ def test_local_auxiliary_failure_never_retries_or_dispatches_to_cloud(local_rout
             else:
                 route.aux.call_llm(**kwargs)
     assert caught.value.code == {"busy": "busy", "deadline": "recovery_required",
-                                 "configuration": "unavailable", "unsupported_mode": "unavailable"}[failure]
-    assert route.state.acquisitions == (0 if failure in {"configuration", "unsupported_mode"} else 1)
+                                 "configuration": "unavailable", "unsupported_mode": "unavailable",
+                                 "capacity": "capacity_unqualified"}[failure]
+    assert route.state.acquisitions == (0 if failure in {"configuration", "unsupported_mode", "capacity"} else 1)
     if failure == "deadline":
         assert len(route.state.dispatches) == 1
         assert route.state.dispatches[0][0].startswith(route.base_url)

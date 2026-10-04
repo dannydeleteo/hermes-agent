@@ -22,6 +22,7 @@ class LocalModelAdmissionError(RuntimeError):
             "busy": "Another local model request is still running. No new request was sent.",
             "recovery_required": "Local model completion is uncertain. New local work is paused for review; no cloud fallback was used.",
             "unavailable": "Local model admission could not be verified. No new request was sent.",
+            "capacity_unqualified": "This local model's memory requirements have not been verified for the running backend. No new request was sent and no cloud fallback was used.",
         }
         self.code = code if code in messages else "unavailable"
         super().__init__(messages[self.code])
@@ -128,13 +129,15 @@ def _selected_policy(base_url):
                 raise ValueError("unsupported path on enrolled backend")
             models = route["models"]
             native_chat = route.get("allow_native_chat", False)
+            require_capacity = route.get("require_capacity_qualification", False)
             if (route.get("protocol") != "ollama-openai-v1" or endpoint in endpoints
                     or type(native_chat) is not bool
+                    or type(require_capacity) is not bool
                     or not isinstance(models, list) or not models
                     or any(not isinstance(model, str) or not model.strip() for model in models)):
                 raise ValueError("invalid route")
             endpoints.add(endpoint)
-            selected = (endpoint, frozenset(models), native_chat)
+            selected = (endpoint, frozenset(models), native_chat, require_capacity)
         if selected is None:
             return None
         source, root, digest = cfg["coordinator_source"], cfg["lane_root"], cfg["coordinator_sha256"]
@@ -143,7 +146,7 @@ def _selected_policy(base_url):
                 raise ValueError("canonical absolute paths required")
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise ValueError("reviewed source digest required")
-        return _Policy(selected[0], selected[1], source, digest, root, selected[2])
+        return _Policy(selected[0], selected[1], source, digest, root, selected[2], selected[3])
     except (KeyError, TypeError, ValueError, OSError, httpx.InvalidURL):
         raise LocalModelAdmissionError() from None
 
@@ -180,6 +183,7 @@ class _Policy:
     digest: str
     root: str
     allow_native_chat: bool = False
+    require_capacity_qualification: bool = False
 
     def acquire(self):
         module = _load_coordinator(self.source, self.digest)

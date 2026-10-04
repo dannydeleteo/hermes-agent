@@ -234,7 +234,8 @@ def test_returned_error_without_reason_omits_no_frame(emits, turn_env):
 
 
 @pytest.mark.parametrize(
-    "reason", ["local_model_busy", "local_model_recovery_required", "local_model_unavailable"]
+    "reason", ["local_model_busy", "local_model_recovery_required", "local_model_unavailable",
+               "local_model_capacity_unqualified"]
 )
 def test_local_failure_survives_desktop_and_mailbox(emits, turn_env, tmp_path, reason):
     from hermes_cli.active_sessions import try_acquire_active_session
