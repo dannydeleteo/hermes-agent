@@ -27,6 +27,34 @@ def strict_json(raw):
     return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
 
 
+class NativeChatCompletionProof:
+    """Physical completion only; accepting the answer is the caller's decision.
+
+    Native nonstream contract: https://docs.ollama.com/api/chat and
+    https://github.com/ollama/ollama/blob/v0.34.3/api/types.go (ChatResponse).
+    The transport calls finish only after clean raw EOF, never on headers/text.
+    """
+    streaming = False
+    done = False
+
+    def __init__(self, model):
+        self.model = model
+        self.buffer = bytearray()
+
+    def feed(self, chunk):
+        if len(self.buffer) + len(chunk) > MAX_BYTES:
+            raise ValueError("completion evidence exceeds bound")
+        self.buffer.extend(chunk)
+
+    def finish(self):
+        response = strict_json(self.buffer)
+        if (not isinstance(response, dict) or response.get("model") != self.model
+                or response.get("done") is not True or "error" in response
+                or response.get("done_reason") not in ("stop", "length")
+                or response.get("remote_host") or response.get("remote_model")):
+            raise ValueError("unmatched or incomplete native backend response")
+
+
 class CompletionProof:
     def __init__(self, model, streaming):
         self.model, self.streaming = model, streaming

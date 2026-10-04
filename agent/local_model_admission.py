@@ -27,7 +27,7 @@ class LocalModelAdmissionError(RuntimeError):
         super().__init__(messages[self.code])
 
 
-def find_admission_error(exc):
+def find_admission_error(exc, *, client=None):
     seen, pending = set(), [exc]
     while pending and len(seen) < 32:
         current = pending.pop()
@@ -37,6 +37,14 @@ def find_admission_error(exc):
         if isinstance(current, LocalModelAdmissionError):
             return current
         pending.extend((current.__context__, current.__cause__))
+    # A caller can stop while consuming a yielded chunk. Its exception is not
+    # raised by the transport, but response.close() has already recorded the
+    # abandoned body's denial. Preserve only observed denial, not a guess that
+    # every unusable answer or post-completion cancellation is uncertain.
+    if is_guarded_client(client):
+        code = client._client._transport.admission.denied
+        if code is not None:
+            return LocalModelAdmissionError(code)
     return None
 
 
@@ -119,12 +127,14 @@ def _selected_policy(base_url):
             if _canonical_endpoint(str(candidate)) != endpoint:
                 raise ValueError("unsupported path on enrolled backend")
             models = route["models"]
+            native_chat = route.get("allow_native_chat", False)
             if (route.get("protocol") != "ollama-openai-v1" or endpoint in endpoints
+                    or type(native_chat) is not bool
                     or not isinstance(models, list) or not models
                     or any(not isinstance(model, str) or not model.strip() for model in models)):
                 raise ValueError("invalid route")
             endpoints.add(endpoint)
-            selected = (endpoint, frozenset(models))
+            selected = (endpoint, frozenset(models), native_chat)
         if selected is None:
             return None
         source, root, digest = cfg["coordinator_source"], cfg["lane_root"], cfg["coordinator_sha256"]
@@ -133,7 +143,7 @@ def _selected_policy(base_url):
                 raise ValueError("canonical absolute paths required")
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise ValueError("reviewed source digest required")
-        return _Policy(*selected, source, digest, root)
+        return _Policy(selected[0], selected[1], source, digest, root, selected[2])
     except (KeyError, TypeError, ValueError, OSError, httpx.InvalidURL):
         raise LocalModelAdmissionError() from None
 
@@ -169,6 +179,7 @@ class _Policy:
     source: str
     digest: str
     root: str
+    allow_native_chat: bool = False
 
     def acquire(self):
         module = _load_coordinator(self.source, self.digest)
@@ -182,20 +193,27 @@ class _Policy:
             raise LocalModelAdmissionError() from None
 
 
-def guarded_client_kwargs(kwargs, *, async_mode=False):
+def guarded_client_kwargs(kwargs, *, async_mode=False, native_chat=False):
     """None leaves remote/unconfigured clients unchanged; selected routes fail closed.
 
     An existing HTTP client cannot be inspected reliably for mounts, proxy retries,
     or hidden routing. Reject injection on enrolled routes instead of bypassing it.
+
+    Native /api/chat callers must explicitly request this separate wire and have
+    allow_native_chat: true on the same enrolled /v1 backend. Unlike ordinary SDK
+    clients, they never receive an unguarded fallback when enrollment is absent.
     """
     policy = _selected_policy(kwargs.get("base_url", ""))
+    if native_chat and (policy is None or not policy.allow_native_chat):
+        raise LocalModelAdmissionError()
     if policy is None:
         return None
     if "http_client" in kwargs:
         raise LocalModelAdmissionError()
     import httpx
     from agent.local_model_transport import LocalTransport, AsyncLocalTransport
-    transport = AsyncLocalTransport(policy) if async_mode else LocalTransport(policy)
+    transport_cls = AsyncLocalTransport if async_mode else LocalTransport
+    transport = transport_cls(policy, native_chat=native_chat)
     cls = httpx.AsyncClient if async_mode else httpx.Client
     client = cls(transport=transport, trust_env=False, follow_redirects=False,
                  timeout=httpx.Timeout(connect=15, read=None, write=15, pool=10))

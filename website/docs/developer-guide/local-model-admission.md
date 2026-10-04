@@ -35,9 +35,19 @@ local_model_admission:
   routes:
     - base_url: http://127.0.0.1:11434/v1
       protocol: ollama-openai-v1
+      # Optional, separately reviewed native nonstream /api/chat callers only:
+      allow_native_chat: false
       models:
         - "<exact served model tag>"
 ```
+
+A native `/api/chat` caller must pass `native_chat=True` to
+`guarded_client_kwargs` and have `allow_native_chat: true` on this same exact
+backend. Both sides are required. This client can send only nonstream native
+chat (`stream: false` explicitly); it cannot send OpenAI completions, Responses,
+other native endpoints, or requests for unenrolled models. Missing/disabled
+enrollment raises a terminal refusal, never an unguarded native client. This
+does not change ordinary SDK clients' absent-policy behavior.
 
 All participating profiles/applications must use the **same machine-user lane
 root**, not separate profile directories. The coordinator must implement the
@@ -63,12 +73,23 @@ at that marker. Earlier text can still stream normally. Response headers,
 rendered text, synthesized partial replies, socket closure and thread/process
 exit are not evidence of backend completion.
 
+Native chat uses its own bounded strict-JSON evidence: the exact requested
+model, boolean `done: true`, `done_reason` of `stop` or `length`, no error or
+remote-host/model identity, and clean raw EOF. A finished but truncated or
+otherwise unusable answer releases physical ownership; the caller must still
+reject its quality. Native chat never relies on OpenAI fingerprints or SSE.
+
 An error, cancellation, early close or unproven reply abandons the lease without
 clearing the durable marker. The same transport stays fenced even if callers
 override the SDK retry count. Native and auxiliary recovery stop before retry or
 cloud fallback. A later intentional auxiliary call may construct a fresh client;
 it must reacquire the same lane and cannot clear uncertainty. Retiring a cached
 client does not close another worker's transport.
+
+A caller rejecting a yielded chunk may raise its own cancellation exception.
+After response closure, `find_admission_error(exc, client=...)` preserves any
+denial actually recorded by that request's transport. It does not infer
+uncertainty from every post-completion cancellation or bad answer.
 
 A synthetic nonstream watchdog timeout carries the original request client's
 admission identity even if the owner switches models while that worker survives.
@@ -89,10 +110,11 @@ unlock here. Backend settlement/recovery requires its separately reviewed
 operator workflow. A surviving worker can still release when it later provides
 valid completion; an abandoned uncertain attempt cannot infer that proof.
 
-The separate phone checker and arbitrary tools posting directly to Ollama are
-not enrolled by this feature. Phone/mailbox status projection also needs to
-preserve the typed local failure and avoid generic retry/provider-switch advice
-before a whole-experience rollout.
+Separate applications, phone checkers and arbitrary tools posting directly to
+Ollama are not automatically enrolled. A reviewed caller must adopt the guarded
+client, preserve typed failure/retry metadata, and prove its physical request
+lifetime. Source support alone is not deployment, rendered UI acceptance, a RAM
+budget or an approved backend-recovery operation.
 
 ## Verification and compatibility
 
@@ -107,7 +129,8 @@ New backend/SDK versions require replaying completion, cancellation and retry
 proofs before enrollment, not assuming generic OpenAI compatibility is enough.
 
 Use `scripts/run_tests.sh` with the four `tests/agent/test_local_model_*` /
-`test_auxiliary_local_model_admission.py` files. When running older provider
+`test_auxiliary_local_model_admission.py` files and `test_native_chat_admission.py`.
+When running older provider
 regressions from a worktree whose Git metadata is under the real Hermes home,
 add `-p tests.agent.local_model_test_support`: it redirects only updater lookup
 to a temporary fixture, leaving the real-home I/O guard intact. The separate

@@ -9,12 +9,13 @@ import threading
 import httpx
 
 from agent.local_model_admission import LocalModelAdmissionError
-from agent.local_model_completion import CompletionProof, MAX_BYTES, strict_json
+from agent.local_model_completion import CompletionProof, NativeChatCompletionProof, MAX_BYTES, strict_json
 
 
 class _Admission:
-    def __init__(self, policy):
+    def __init__(self, policy, *, native_chat=False):
         self.policy = policy
+        self.native_chat = native_chat
         self.lock = threading.Lock()
         self.denied = None
 
@@ -23,7 +24,9 @@ class _Admission:
             if self.denied is not None:
                 raise LocalModelAdmissionError(self.denied)
             try:
-                if request.method != "POST" or str(request.url) != self.policy.base_url + "/chat/completions":
+                expected_url = (str(httpx.URL(self.policy.base_url).copy_with(path="/api/chat"))
+                                if self.native_chat else self.policy.base_url + "/chat/completions")
+                if request.method != "POST" or str(request.url) != expected_url:
                     raise LocalModelAdmissionError()
                 if len(request.content) > MAX_BYTES:
                     raise LocalModelAdmissionError()
@@ -32,7 +35,14 @@ class _Admission:
                         or type(body.get("stream", False)) is not bool
                         or type(body.get("n", 1)) is not int or body.get("n", 1) != 1):
                     raise LocalModelAdmissionError()
-                proof = CompletionProof(body["model"], body.get("stream", False))
+                if self.native_chat:
+                    # Native Ollama defaults to streaming, unlike OpenAI. No
+                    # implicit default or NDJSON support on this bounded seam.
+                    if body.get("stream") is not False:
+                        raise LocalModelAdmissionError()
+                    proof = NativeChatCompletionProof(body["model"])
+                else:
+                    proof = CompletionProof(body["model"], body.get("stream", False))
                 lease = self.policy.acquire()
                 return _Ownership(self, lease, proof)
             except Exception as exc:
@@ -129,8 +139,8 @@ class _AsyncBody(httpx.AsyncByteStream):
 
 
 class LocalTransport(httpx.BaseTransport):
-    def __init__(self, policy):
-        self.admission = _Admission(policy)
+    def __init__(self, policy, *, native_chat=False):
+        self.admission = _Admission(policy, native_chat=native_chat)
         self.inner = httpx.HTTPTransport(retries=0, trust_env=False)
 
     @property
@@ -159,8 +169,8 @@ class LocalTransport(httpx.BaseTransport):
 
 
 class AsyncLocalTransport(httpx.AsyncBaseTransport):
-    def __init__(self, policy):
-        self.admission = _Admission(policy)
+    def __init__(self, policy, *, native_chat=False):
+        self.admission = _Admission(policy, native_chat=native_chat)
         self.inner = httpx.AsyncHTTPTransport(retries=0, trust_env=False)
 
     async def handle_async_request(self, request):
