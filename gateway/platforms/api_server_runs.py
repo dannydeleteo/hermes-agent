@@ -194,6 +194,12 @@ def terminal_run_status(result: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     }
     if not finished and result.get("turn_exit_reason"):
         fields["turn_exit_reason"] = str(result["turn_exit_reason"])
+    if not finished:
+        reason = result.get("failure_reason")
+        if isinstance(reason, str) and reason:
+            fields["failure_reason"] = reason
+        if isinstance(result.get("failure_retryable"), bool):
+            fields["failure_retryable"] = result["failure_retryable"]
     if result.get("pending_steer"):
         # Undelivered steer text rides on every terminal event/status for client replay.
         fields["pending_steer"] = result["pending_steer"]
@@ -897,7 +903,11 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: Dict[
         elif record["status"] == "cancelled":
             _finish("cancelled", completed=False, partial=False, interrupted=True)
         else:
-            _finish("failed", completed=False, partial=False, interrupted=False,
+            _, failure_fields = terminal_run_status({
+                "failed": True, "failure_reason": record.get("failure_reason"),
+                "failure_retryable": record.get("failure_retryable"),
+            })
+            _finish("failed", **failure_fields,
                     error=record.get("error") or f"Bot Chat delivery {record['status']}",
                     **({"reason": record["reason"]} if record.get("reason") else {}))
     except asyncio.CancelledError:

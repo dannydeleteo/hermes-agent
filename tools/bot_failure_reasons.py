@@ -19,6 +19,9 @@ QUEUED_EXPIRED = "queued_expired"
 DELIVERY_TIMEOUT = "delivery_timeout"
 AGENT_BLOCKED = "agent_blocked"
 CANCELLED = "cancelled"
+LOCAL_MODEL_BUSY = "local_model_busy"
+LOCAL_MODEL_RECOVERY_REQUIRED = "local_model_recovery_required"
+LOCAL_MODEL_UNAVAILABLE = "local_model_unavailable"
 
 # agent-side
 PROVIDER_AUTH_OR_ACCESS = "provider_auth_or_access"
@@ -37,6 +40,7 @@ ALL_REASONS = frozenset({
     PROVIDER_AUTH_OR_ACCESS, PROVIDER_QUOTA_LIMIT, PROVIDER_RATE_LIMIT,
     PROVIDER_SERVER_ERROR, CONTEXT_OVERFLOW, MISSING_CONFIG, MODEL_UNAVAILABLE,
     TARGET_SCOPE_UNRESOLVED, UNKNOWN,
+    LOCAL_MODEL_BUSY, LOCAL_MODEL_RECOVERY_REQUIRED, LOCAL_MODEL_UNAVAILABLE,
 })
 
 #: Reasons a supervisor may retry automatically without human intervention.
@@ -52,6 +56,8 @@ def is_auto_retryable(reason: str) -> bool:
 # sanctioned context mutation) on the same session first; everything else
 # (auth/quota/config/model/unknown) is never auto-retried — it can't be fixed by
 # a retry and only burns quota.
+# A structured producer's explicit failure_retryable=False vetoes this legacy
+# prose policy, including context recovery already exhausted inside the turn.
 # See #93091.
 RETRY_RESUME = "resume"
 RETRY_COMPRESS_THEN_RESUME = "compress_then_resume"
@@ -112,11 +118,28 @@ def result_retry_action(result: Any) -> str:
     instead of two streams — ``error`` carries the raw provider summary (status codes included) and
     ``failure_reason`` the turn loop's own typed verdict, which is what names an overflow the copy only
     describes in prose. ``RETRY_NONE`` for anything that did not fail (and for a non-dict result), so a
-    successful turn whose text happens to mention 429 is never re-run."""
+    successful turn whose text happens to mention 429 is never re-run. An explicit
+    ``failure_retryable=False`` also wins: the producer may already have exhausted
+    compression or refused local admission. Legacy results without that veto keep
+    the existing single recovery attempt."""
     if not isinstance(result, dict) or not result.get("failed"):
         return RETRY_NONE
-    return retry_action(classify_agent_error(
-        turn_failure_text(result.get("error"), result.get("failure_reason"))))
+    if result.get("failure_retryable") is False:
+        return RETRY_NONE
+    return retry_action(result_failure_reason(result))
+
+
+def result_failure_reason(result: dict[str, Any]) -> str:
+    """Keep a known typed verdict; use the legacy prose classifier otherwise.
+
+    In particular, an admission refusal is not a provider outage even when its
+    diagnostic text mentions HTTP 503. Local refusals never authorize auto-retry.
+    """
+    reason = result.get("failure_reason")
+    if isinstance(reason, str) and reason in ALL_REASONS and reason != UNKNOWN:
+        return reason
+    return classify_agent_error(turn_failure_text(
+        result.get("error"), reason if isinstance(reason, str) else None))
 
 
 def classify_agent_error(text: str) -> str:

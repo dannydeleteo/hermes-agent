@@ -658,13 +658,16 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
         status = str(terminal.get("status") or "failed")
         error = str(terminal.get("error") or "")
         reason = "cancelled" if status == "cancelled" else ""
+        failure_fields = {}
         if status not in {"settled", "cancelled"}:
-            from tools.bot_failure_reasons import classify_agent_error
-            reason = classify_agent_error(error)
+            from tools.bot_failure_reasons import result_failure_reason
+            reason = result_failure_reason(terminal)
+            failure_fields = {key: terminal[key] for key in ("failure_reason", "failure_retryable")
+                              if key in terminal}
         # Let a failed write propagate: the turn must not retire its crash marker without its receipt.
         complete_delivery(home, delivery_id, status=status,
                           reply=str(terminal.get("text") or "") if status == "settled" else "",
-                          error=error, reason=reason)
+                          error=error, reason=reason, **failure_fields)
 
     try:
         started = _run_prompt_submit(f"__bot_dm__{delivery_id}", sid, session, claimed["message"],

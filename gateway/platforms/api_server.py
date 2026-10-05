@@ -3617,6 +3617,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # delivery lanes already apply (#93091 item 5, #115325). Same policy, same gate: transient
         # classes (429 / 5xx) re-run the SAME session once, a context overflow lets the re-run's
         # pre-API compaction shrink the transcript first, and auth/quota/config/model never re-run. The
+        # producer's explicit failure_retryable=False vetoes this, including exhausted compression.
         # store is read again first: the failed attempt's turn-start persist left the DM as the
         # transcript's unanswered tail row, and the re-run resumes that row instead of appending a
         # second copy of it. A turn that fails again reaches the peer client exactly as before.
