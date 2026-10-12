@@ -9,6 +9,10 @@ Handlers: ``tui_gateway/methods_groups.py``, ``tui_gateway/methods_bot_relay.py`
 
 from __future__ import annotations
 
+from typing import Literal
+
+from pydantic import Field
+
 from .base import JsonValue, Params, Result, WireEnum
 from .common import OkResult, OpenModel, ProfileParams
 from .registry import method
@@ -569,6 +573,67 @@ class BotRelayReplyParams(ProfileParams):
 
 method("bot_relay.reply", params=BotRelayReplyParams, result=OkResult,
        doc="Write a relayed reply and/or typed error for an envelope so the sender-side waiter resolves.")
+
+
+# ── owner-local notification persistence (not transcript/model delivery) ──────────────────────
+
+
+class BotNotificationTarget(Params):
+    endpoint_id: str = Field(min_length=1, max_length=256, strict=True)
+    generation: str = Field(min_length=1, max_length=256, strict=True)
+
+
+class BotNotificationRegisterParams(Params):
+    session_id: str = Field(min_length=1, max_length=256, strict=True)
+    owner_opt_in: bool = Field(strict=True)
+    expires_at: float = Field(gt=0, allow_inf_nan=False, strict=True)
+
+
+class BotNotificationRegisterResult(Result):
+    target: BotNotificationTarget
+    permissions: list[Literal["store", "status"]]
+    expires_at: float
+    wake_enabled: Literal[False]
+    meaning: Literal["notification_storage_only"]
+
+
+class BotNotificationStatusParams(Params):
+    session_id: str = Field(min_length=1, max_length=256, strict=True)
+    target: BotNotificationTarget
+    notification_id: str = Field(min_length=36, max_length=36, strict=True)
+
+
+class BotNotificationStoreParams(BotNotificationStatusParams):
+    text: str = Field(min_length=1, max_length=16384, strict=True)
+    expires_at: float = Field(gt=0, allow_inf_nan=False, strict=True)
+
+
+class BotNotificationReceipt(Result):
+    notification_id: str
+    delivery_id: str
+    payload_digest: str
+    generation: str
+    state: Literal["stored"]
+    arrived_at: float
+    updated_at: float
+    evidence_kind: Literal["injected-contract"]
+    provider_budget_enforcement: Literal["unverified"]
+
+
+class BotNotificationResult(Result):
+    receipt: BotNotificationReceipt
+    text: str
+    expires_at: float
+    meaning: Literal["notification_storage_only"]
+
+
+method("bot_notifications.register", params=BotNotificationRegisterParams,
+       result=BotNotificationRegisterResult,
+       doc="Explicitly enroll an admitted existing owner for notification storage/status only; never discover or wake a chat.")
+method("bot_notifications.store", params=BotNotificationStoreParams, result=BotNotificationResult,
+       doc="Durably store a notification once; not transcript delivery or a model answer.")
+method("bot_notifications.status", params=BotNotificationStatusParams, result=BotNotificationResult,
+       doc="Read one exact owner's retained notification receipt; never create, retry or wake work.")
 
 
 # ── browser controller ────────────────────────────────────────────────────────────────────────

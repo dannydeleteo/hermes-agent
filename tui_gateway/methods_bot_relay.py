@@ -248,10 +248,52 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
         return _err(rid, 5095, str(e))
 
 
+def _notification_method(operation):
+    """No relay fallback: only a previously admitted exact owner's receipt store."""
+    @method(f"bot_notifications.{operation}")
+    def handler(rid, params):
+        from gateway.bot_chat_notifications import Refused, RefusalCode
+        from pydantic import ValidationError
+        from tui_gateway.contracts.registry import METHODS
+        from tui_gateway.bot_chat_notification_host import request
+
+        try:
+            params = METHODS[f"bot_notifications.{operation}"].params.model_validate(params).model_dump()
+        except ValidationError:
+            return _err(rid, 4000, "invalid notification parameters")
+        sid = params.get("session_id", "")
+        transport, owner = _current_session_steer_authority(sid)
+        identity = getattr(transport, "auth_identity", None)
+        if (transport is None or owner is None
+                or not _methods_browser_control._is_authenticated_identity(identity)):
+            return _err(rid, 4403, "authenticated attached owner required")
+        principal = _methods_browser_control._principal_digest(identity)
+        try:
+            with _session_turn_admission(owner) as admitted:
+                current_transport, current_owner = _current_session_steer_authority(sid)
+                if not admitted or current_transport is not transport or current_owner is not owner:
+                    raise Refused(RefusalCode.STALE)
+                # Bind home + secret + terminal scope AFTER owner authorization;
+                # request-selected profile/path fields are not in these contracts.
+                with _session_profile_runtime_scope(owner, hydrate_secrets=False):
+                    result = request(operation, sid, owner, transport, principal, params)
+                return _ok(rid, result)
+        except Refused as exc:
+            return _err(rid, 4096, "notification request refused", data={"reason": exc.code.value})
+    return handler
+
+
+_notification_method("register")
+_notification_method("store")
+_notification_method("status")
+
+
 def register(server) -> None:
     _registry.install(server)
     from . import methods_groups
-    server._LONG_HANDLERS = server._LONG_HANDLERS | methods_groups.LONG_HANDLERS
+    # Receipt I/O and the owner's lock must not park the socket reader or stop
+    # approval/interrupt frames. Use the maintained bounded RPC pool.
+    server._LONG_HANDLERS = server._LONG_HANDLERS | methods_groups.LONG_HANDLERS | _registry.names()
     for name in (
         "get_hosted_room_service", "_WORKER_UNAVAILABLE", "_profile_name", "_requested_profile",
         "_api_server_key", "_room_link_run_storage_durable"):

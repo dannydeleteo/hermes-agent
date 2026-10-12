@@ -1761,6 +1761,51 @@ export interface BotRelayReplyParams {
   error?: string | null
   reason?: string | null
 }
+export interface BotNotificationRegisterParams {
+  session_id: string
+  owner_opt_in: boolean
+  expires_at: number
+}
+export interface BotNotificationRegisterResult {
+  target: BotNotificationTarget
+  permissions: ('store' | 'status')[]
+  expires_at: number
+  wake_enabled: false
+  meaning: 'notification_storage_only'
+}
+export interface BotNotificationTarget {
+  endpoint_id: string
+  generation: string
+}
+export interface BotNotificationStoreParams {
+  session_id: string
+  target: BotNotificationTarget
+  notification_id: string
+  text: string
+  expires_at: number
+}
+export interface BotNotificationResult {
+  receipt: BotNotificationReceipt
+  text: string
+  expires_at: number
+  meaning: 'notification_storage_only'
+}
+export interface BotNotificationReceipt {
+  notification_id: string
+  delivery_id: string
+  payload_digest: string
+  generation: string
+  state: 'stored'
+  arrived_at: number
+  updated_at: number
+  evidence_kind: 'injected-contract'
+  provider_budget_enforcement: 'unverified'
+}
+export interface BotNotificationStatusParams {
+  session_id: string
+  target: BotNotificationTarget
+  notification_id: string
+}
 export interface BrowserControllerRegisterParams {
   session_id: string
   controller_id: string
@@ -4895,6 +4940,12 @@ export interface RpcMethods {
   'billing.state': { params: ProfileParams; result: BillingStateResult }
   /** Run the billing:manage device flow; the URL/code arrive via billing.step_up.verification. */
   'billing.step_up': { params: BillingStepUpParams; result: BillingStepUpResult }
+  /** Explicitly enroll an admitted existing owner for notification storage/status only; never discover or wake a chat. */
+  'bot_notifications.register': { params: BotNotificationRegisterParams; result: BotNotificationRegisterResult }
+  /** Read one exact owner's retained notification receipt; never create, retry or wake work. */
+  'bot_notifications.status': { params: BotNotificationStatusParams; result: BotNotificationResult }
+  /** Durably store a notification once; not transcript delivery or a model answer. */
+  'bot_notifications.store': { params: BotNotificationStoreParams; result: BotNotificationResult }
   /** Deliver a relayed DM into a Bot Chat on this gateway and return the one-turn reply (blocking). */
   'bot_relay.deliver': { params: BotRelayDeliverParams; result: BotRelayDeliverResult }
   /** Atomically claim every pending cross-connection envelope queued on this gateway. */
@@ -5391,6 +5442,9 @@ export const RPC_METHODS = [
   'billing.charge_status',
   'billing.state',
   'billing.step_up',
+  'bot_notifications.register',
+  'bot_notifications.status',
+  'bot_notifications.store',
   'bot_relay.deliver',
   'bot_relay.outbox.drain',
   'bot_relay.reply',

@@ -625,6 +625,7 @@ def _notif_handle_ready(sid, session, events, emitted, registry, fmt, deferred, 
 def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
     """Run one durable envelope only after local FIFO/continuations yield the idle boundary."""
     from tools.bot_live_delivery import claim_pending_delivery, complete_delivery, find_canonical_live_owner, has_mailbox
+    from tui_gateway.bot_chat_notification_host import observe_owner
 
     home = _session_home(session)
     # Most profiles never receive a delivery: without a mailbox there is nothing to claim, and the owner
@@ -641,11 +642,15 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
         lease = session.get("active_session_lease")
         if lease is None or getattr(lease, "released", False):
             return False
+        # Invalidate stale observation even if the maintained lookup raises. This
+        # metadata handoff neither enrolls a caller nor makes an additional lookup.
+        observe_owner(sid, session, None)
         owner = find_canonical_live_owner(home)
         if (not owner or owner.get("lease_id") != lease.lease_id
                 or owner.get("live_session_id") != sid
                 or owner.get("session_id") != session.get("session_key")):
             return False
+        observe_owner(sid, session, owner)
         # The mailbox matches each envelope to this pinned lease/live id and compression lineage.
         claimed = claim_pending_delivery(home, owner)
         if claimed is None:

@@ -169,6 +169,60 @@
       }
     },
     {
+      "name": "bot_notifications.register",
+      "summary": "Explicitly enroll an admitted existing owner for notification storage/status only; never discover or wake a chat.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/BotNotificationRegisterParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/BotNotificationRegisterResult"
+        }
+      }
+    },
+    {
+      "name": "bot_notifications.status",
+      "summary": "Read one exact owner's retained notification receipt; never create, retry or wake work.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/BotNotificationStatusParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/BotNotificationResult"
+        }
+      }
+    },
+    {
+      "name": "bot_notifications.store",
+      "summary": "Durably store a notification once; not transcript delivery or a model answer.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/BotNotificationStoreParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/BotNotificationResult"
+        }
+      }
+    },
+    {
       "name": "bot_relay.deliver",
       "summary": "Deliver a relayed DM into a Bot Chat on this gateway and return the one-turn reply (blocking).",
       "params": [
@@ -6898,6 +6952,251 @@
           "user_code"
         ],
         "title": "BillingStepUpVerificationPayload",
+        "type": "object"
+      },
+      "BotNotificationReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "notification_id": {
+            "title": "Notification Id",
+            "type": "string"
+          },
+          "delivery_id": {
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "payload_digest": {
+            "title": "Payload Digest",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "string"
+          },
+          "state": {
+            "const": "stored",
+            "title": "State",
+            "type": "string"
+          },
+          "arrived_at": {
+            "title": "Arrived At",
+            "type": "number"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "number"
+          },
+          "evidence_kind": {
+            "const": "injected-contract",
+            "title": "Evidence Kind",
+            "type": "string"
+          },
+          "provider_budget_enforcement": {
+            "const": "unverified",
+            "title": "Provider Budget Enforcement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "notification_id",
+          "delivery_id",
+          "payload_digest",
+          "generation",
+          "state",
+          "arrived_at",
+          "updated_at",
+          "evidence_kind",
+          "provider_budget_enforcement"
+        ],
+        "title": "BotNotificationReceipt",
+        "type": "object"
+      },
+      "BotNotificationRegisterParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "owner_opt_in": {
+            "title": "Owner Opt In",
+            "type": "boolean"
+          },
+          "expires_at": {
+            "exclusiveMinimum": 0,
+            "title": "Expires At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "session_id",
+          "owner_opt_in",
+          "expires_at"
+        ],
+        "title": "BotNotificationRegisterParams",
+        "type": "object"
+      },
+      "BotNotificationRegisterResult": {
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/BotNotificationTarget"
+          },
+          "permissions": {
+            "items": {
+              "enum": [
+                "store",
+                "status"
+              ],
+              "type": "string"
+            },
+            "title": "Permissions",
+            "type": "array"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "number"
+          },
+          "wake_enabled": {
+            "const": false,
+            "title": "Wake Enabled",
+            "type": "boolean"
+          },
+          "meaning": {
+            "const": "notification_storage_only",
+            "title": "Meaning",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "permissions",
+          "expires_at",
+          "wake_enabled",
+          "meaning"
+        ],
+        "title": "BotNotificationRegisterResult",
+        "type": "object"
+      },
+      "BotNotificationResult": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "$ref": "#/components/schemas/BotNotificationReceipt"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "number"
+          },
+          "meaning": {
+            "const": "notification_storage_only",
+            "title": "Meaning",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt",
+          "text",
+          "expires_at",
+          "meaning"
+        ],
+        "title": "BotNotificationResult",
+        "type": "object"
+      },
+      "BotNotificationStatusParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/BotNotificationTarget"
+          },
+          "notification_id": {
+            "maxLength": 36,
+            "minLength": 36,
+            "title": "Notification Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "target",
+          "notification_id"
+        ],
+        "title": "BotNotificationStatusParams",
+        "type": "object"
+      },
+      "BotNotificationStoreParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/BotNotificationTarget"
+          },
+          "notification_id": {
+            "maxLength": 36,
+            "minLength": 36,
+            "title": "Notification Id",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          },
+          "expires_at": {
+            "exclusiveMinimum": 0,
+            "title": "Expires At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "session_id",
+          "target",
+          "notification_id",
+          "text",
+          "expires_at"
+        ],
+        "title": "BotNotificationStoreParams",
+        "type": "object"
+      },
+      "BotNotificationTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Endpoint Id",
+            "type": "string"
+          },
+          "generation": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Generation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "endpoint_id",
+          "generation"
+        ],
+        "title": "BotNotificationTarget",
         "type": "object"
       },
       "BotRelayDeliverParams": {
