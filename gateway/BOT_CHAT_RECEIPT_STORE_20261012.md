@@ -180,3 +180,31 @@ claimed. Root next runs the ordinary create/store/reopen case under the unchange
 canonical harness, then the broader approved scope only after that positive
 case passes. The separate ownership gate remains pending. All native, provider,
 budget, host-binding, manual, Source101 and installation limits above remain.
+
+
+## Root integration verification — October 12, 2026
+
+Reviewed successor: `7a77463ce53e5a2791a971a84a316bcb2c22b076`, tree
+`1756fa78f8b152baa4be63590b54fef22a028fee`. Independent delta review and
+execution closure cleared the disconnected component for source integration.
+The original `d07297f` failure remains retained; its function-identity preflight
+is replaced with guarded actual descriptor-relative calls and narrowly sanitized
+unsupported-operation errors. No guard, old wrapper, dependency or caller changed.
+
+The mandatory canonical runner passed 100 unique cases in a pinned, isolated
+Linux arm64 environment. First, an actual create/store/reopen test passed.
+Then 45 new-store, 32 unchanged-wrapper and 22 unchanged-isolation cases passed
+with all container capabilities dropped. The one alternate-ownership case ran
+separately and passed with only CAP_CHOWN effective; its container had no host
+mounts, network or privileged mode. The first positive repeats one broad case
+and is not counted as a 101st unique test. All 19 source/guard/dependency pins
+matched before and after execution. The existing environment retained its 89
+lock-matched distributions; no new dependency, provider or model was requested.
+
+This is a selected Linux source gate, not a full repository or native Mac gate.
+Mac full-fsync and power-loss recovery, real caller/owner registration, admission
+gate, mailbox hooks, usage policy, runtime installation and ordinary delivery
+remain unqualified. The store still has no runtime importer or default path.
+Corey's canonical Hermes and collaboration manuals describe source preparation
+separately from installed behavior; their October 12 verification and index
+check accompany integration. Original author branches and history are preserved.
