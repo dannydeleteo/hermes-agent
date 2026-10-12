@@ -57,7 +57,7 @@ def _storage_errors():
         yield
     except Refused:
         raise
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, OverflowError, RecursionError):
+    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, OverflowError, RecursionError, NotImplementedError):
         raise Refused(RefusalCode.STORAGE) from None
 
 
@@ -205,8 +205,9 @@ class SQLiteReceiptStore:
 
     @contextmanager
     def _directory_fd(self):
-        _require(os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
-                 and all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "geteuid")))
+        # Guard/decorator wrappers change callable identity, not dir_fd support.
+        # Use the guarded operations below; unsupported calls fail closed.
+        _require(all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "geteuid")))
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         descriptor = os.open(self.directory.anchor, flags)
         try:

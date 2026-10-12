@@ -337,7 +337,8 @@ def test_malformed_typed_receipt_cannot_reserve_a_key(private_dir, change):
     assert store.read(key(row)) is None
 
 
-@pytest.mark.parametrize("text", ["x" * 16385, "é" * 8193, "\ud800", " "])
+@pytest.mark.parametrize("text", ["x" * 16385, "é" * 8193, "\ud800", " "],
+                         ids=["ascii-over-limit", "utf8-over-limit", "invalid-surrogate", "blank"])
 def test_invalid_or_unbounded_text_is_not_persisted(private_dir, text):
     store = SQLiteReceiptStore(private_dir, create=True, capacity=1)
     row = receipt()

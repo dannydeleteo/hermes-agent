@@ -1,6 +1,7 @@
 # Bot Chat receipt store — source handoff, October 12, 2026
 
-Status: disconnected source draft; canonical execution and independent review pending.
+Status: capability-detection successor; fresh canonical execution and independent
+review pending. The original draft failed its canonical gate, as recorded below.
 
 Runtime impact: none. This change does not register a chat, deliver a message,
 start a model, change a schedule, or install anything in the running Hermes.
@@ -23,7 +24,7 @@ Hermes session performance. Sole claimed paths:
 
 Base: fetched GitHub `main`, `a50c5d2ccae79c1cee18f55f0fd703d38983b5bd`,
 tree `daa5f59cb2cebf1240ba3ae0b54d60ebed5bab78`.
-Branch: `codex/bot-chat-receipt-store-20261012`.
+Original branch: `codex/bot-chat-receipt-store-20261012`.
 The source commit/tree and final three file hashes are supplied with the frozen
 handoff; a document cannot contain its own final commit hash.
 
@@ -95,7 +96,7 @@ a sanitized storage refusal and retains the database; reopening returns the
 durable truth. It never turns that uncertainty into another dispatch. Storage
 errors do not expose raw paths or backend error strings through `Refused`.
 
-## Verification at this checkpoint
+## Original draft verification, before Root's canonical run
 
 Completed: source-only Python AST parsing of the new module and test file.
 This did not import or execute them. No red/green test result is claimed.
@@ -115,7 +116,7 @@ isolated root test user and explicitly skips otherwise. No operating system is
 mocked. Existing wrapper tests and runner-isolation tests retain their own scope;
 their earlier Linux success does not execute these new tests.
 
-Source hashes at drafting:
+Original draft hashes, preserved at `d07297fa6b601956622f9d50f1d428c476dcb85d`:
 
 - store: `928179b211d47bd8c84b0d6ba4ac9fead4b262f9c877952b2d8dc3e49a716d31`
 - new tests: `716630c9b0ccd56481fbd7f8b40e63bf518111e741d1ef6489421fb128245cf0`
@@ -135,3 +136,47 @@ No canonical Corey Guide changed: this disconnected draft adds no owner-visible
 operation or supported recovery route. Root owns the eventual manual update,
 Last verified date and owner-guide check when an owner-facing connection is
 accepted. This technical handoff is not a competing owner manual.
+
+## Forward correction — guard-compatible capability detection
+
+Root executed the mandatory canonical runner on the exact original draft in its
+network-disabled Linux container. The retained control and output are in the
+private `hermes-receipt-store-canonical-20261012` receipt folder. The result was
+59 passed, 40 failed and one deselected: unchanged wrapper 32 and isolation 22
+passed; the new store had five negative-case passes and 40 constructor failures.
+Those negative passes do not qualify directory protections that the constructor
+never reached. The separate ownership case was not run.
+
+The retained first ordinary create/store/reopen test fails at `_directory_fd`
+before database creation. `os.open in os.supports_dir_fd` and the corresponding
+`os.stat` membership check compare function identity, not actual support.
+`tests/conftest.py` installs `HomeIOGuard`; `tests/home_io_guard.py` wraps these
+functions, checks the supplied path and forwards `dir_fd` to the existing OS
+implementation. It does not replace the original function objects in
+`os.supports_dir_fd`. The source check therefore refused a supported guarded
+operation. This is the retained RED evidence; the held head was not rerun.
+
+Successor branch: `codex/bot-chat-receipt-store-fd-20261012`, based directly on
+the immutable original `d07297fa6b601956622f9d50f1d428c476dcb85d`.
+Only the same three claimed paths change:
+
+- Remove function-identity membership as a prerequisite. Keep required hard
+  no-follow flags and the existing checked descriptor walk, inode, ownership,
+  private-file and transaction checks. Every OS call still goes through the
+  installed guards; nothing unwraps, replaces or bypasses them.
+- Map narrowly unsupported operations (`NotImplementedError`, alongside the
+  existing OS/type errors) to the typed storage refusal. Do not catch general
+  `RuntimeError`, `AssertionError` or pytest safety tripwires.
+- Give the four existing long-text cases short diagnostic IDs. Inputs and
+  assertions are unchanged; no test coverage is removed or added.
+
+Successor source hashes:
+
+- store: `b7fe3a39c9f034cad059935f3f1bffdc8a224d014171f6f00742f049715fde6b`
+- tests: `ff62f1e3bf84c0d673ee28895ee79d586abb3728e0e63b83f157a0d24faa32fe`
+
+Source-only AST parsing and diff checks pass. No successor execution result is
+claimed. Root next runs the ordinary create/store/reopen case under the unchanged
+canonical harness, then the broader approved scope only after that positive
+case passes. The separate ownership gate remains pending. All native, provider,
+budget, host-binding, manual, Source101 and installation limits above remain.
