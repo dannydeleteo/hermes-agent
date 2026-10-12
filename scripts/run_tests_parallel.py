@@ -435,6 +435,7 @@ def _run_one_file(
     repo_root: Path,
     file_timeout: float,
     retries: int = 0,
+    *, isolation_root=None,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Run ``python -m pytest <file> <pytest_args>`` in a fresh subprocess.
 
@@ -468,8 +469,13 @@ def _run_one_file(
     orphan onto PID 1. This outer timeout exists only to
     bound a pathologically slow or hung file as a whole.
     """
+    isolation_options = {} if isolation_root is None else {"isolation_root": isolation_root}
+    if isolation_root is not None:
+        # This opt-in qualification path retains each result and never repeats
+        # a test automatically, including when child cleanup is uncertain.
+        retries = 0
     file, rc, output, summary, subproc_wall = _run_one_file_once(
-        file, pytest_args, repo_root, file_timeout
+        file, pytest_args, repo_root, file_timeout, **isolation_options
     )
     attempt = 0
     # A worker killed by signal (OOM, SIGKILL) or the file timeout is a runaway, not a flake:
@@ -480,7 +486,7 @@ def _run_one_file(
         attempt += 1
         first_output = output
         file, rc, output, summary, subproc_wall2 = _run_one_file_once(
-            file, pytest_args, repo_root, file_timeout
+            file, pytest_args, repo_root, file_timeout, **isolation_options
         )
         subproc_wall += subproc_wall2
         if rc == 0:
@@ -508,8 +514,23 @@ def _run_one_file_once(
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    *, isolation_root=None,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
+    if isolation_root is not None:
+        from scripts.run_tests_isolation import IsolationError, launch_isolated
+
+        started = time.monotonic()
+        command = [sys.executable, "-s", "-B", "-m", "pytest", str(file),
+                   *pytest_args, "-p", "no:cacheprovider"]
+        try:
+            output, rc = launch_isolated(command, isolation_root, str(repo_root),
+                                         os.environ.copy(), file_timeout)
+        except IsolationError as exc:
+            # No legacy kill-tree fallback, shared sweep, deletion or retry.
+            output, rc = f"isolated attempt failed closed: {exc}; scratch retained\n", 124
+        return _file_result(file, rc, output, started)
+
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
 
     # Give this subprocess its own pytest temp root.
@@ -594,6 +615,11 @@ def _run_one_file_once(
         # behind; make them writable and retry instead of skipping them.
         _rmtree_force(temproot)
 
+    return _file_result(file, rc, output, subproc_start)
+
+
+def _file_result(file: Path, rc: int, output: str, subproc_start: float):
+    """Shared reporting only; both lifetime paths retain the same failure rules."""
     if rc not in (0, 5) and not output.strip():
         output = f"pytest child exited {rc} (0x{rc & 0xffffffff:08x}) with no output: {file}\n"
 
@@ -994,6 +1020,19 @@ def main() -> int:
         help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count)",
     )
     parser.add_argument(
+        "--isolation-root",
+        action="append",
+        metavar="ABSOLUTE_PATH",
+        help=(
+            "Opt-in existing canonical caller-owned mode-0700 scratch root outside source/runtime. "
+            "Requires explicit, separately qualified Python 3.14 HERMES_PYTHON and OS sandbox; "
+            "not itself a sandbox or guard bypass. Retains per-file scratch; no shared sweep, "
+            "automatic retries, bytecode or duration-cache writes. Pins pytest basetemp; "
+            "ignores inherited PYTEST_ADDOPTS and rejects a child option terminator. "
+            "Defaults are unchanged."
+        ),
+    )
+    parser.add_argument(
         "--paths",
         default=os.environ.get("HERMES_TEST_PATHS", ":".join(_DEFAULT_ROOTS)),
         help=(
@@ -1107,7 +1146,7 @@ def main() -> int:
     OUR_FLAGS = {
         "-h", "--help", "-j", "--jobs", "--paths", "--include-integration",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
-        "--files-from",
+        "--files-from", "--isolation-root",
     }
     # pytest short flags that consume the NEXT token as their value.
     PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
@@ -1156,6 +1195,27 @@ def main() -> int:
         i += 1
 
     args = parser.parse_args(our_args)
+
+    # Fail before pytest imports, discovery, cache reads or any scratch work.
+    # The shell wrapper also performs stdlib-only preflight before activation.
+    isolation_root = None
+    if args.isolation_root is not None:
+        from scripts.run_tests_isolation import IsolationError, preflight, require_timeout
+
+        if len(args.isolation_root) != 1:
+            parser.error("--isolation-root may be specified only once")
+        try:
+            isolation_root = preflight(
+                args.isolation_root[0], str(Path(__file__).resolve().parent.parent),
+                os.environ.get("HERMES_PYTHON", ""),
+            )
+            require_timeout(args.file_timeout)
+        except IsolationError as exc:
+            parser.error(str(exc))
+        # Preserve the real guard/plugin path; only disable user-site and caches.
+        sys.dont_write_bytecode = True
+        os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+        os.environ["PYTHONNOUSERSITE"] = "1"
 
     # Bare tokens are validated against pytest's option set so a typo fails
     # here with usage instead of once per discovered file. Anything after a
@@ -1261,7 +1321,7 @@ def main() -> int:
 
     # --generate-slices: compute LPT distribution and emit JSON, then exit.
     if args.generate_slices is not None:
-        durations = _load_durations(repo_root)
+        durations = _load_durations(repo_root) if isolation_root is None else {}
         slices = _compute_lpt_slices(
             files, args.generate_slices, durations, repo_root
         )
@@ -1284,7 +1344,7 @@ def main() -> int:
 
     # Apply slicing if requested (partition from the checkout alone; see _slice_files).
     if slice_index is not None:
-        durations = _load_durations(repo_root)
+        durations = _load_durations(repo_root) if isolation_root is None else {}
         files = _slice_files(files, slice_index, slice_count, durations, repo_root)
         # Recount after slicing.
         test_counts = {f: test_counts[f] for f in files if f in test_counts}
@@ -1375,13 +1435,19 @@ def main() -> int:
 
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    _sweep_killed_run_roots(_runner_scratch_root())
+    if isolation_root is None:
+        _sweep_killed_run_roots(_runner_scratch_root())
+    else:
+        print("Isolated mode: private scratch retained; shared cleanup, automatic retries and cache writes disabled.")
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         # Duration cache for the timeout scaler: known-slow files get
         # proportional headroom instead of a false timeout-kill under
         # CI load (see _effective_file_timeout).
-        timeout_durations = _load_durations(repo_root)
+        # The isolated qualification path uses the stated cap, never an older
+        # shared duration measurement to silently extend the allowed lifetime.
+        timeout_durations = _load_durations(repo_root) if isolation_root is None else {}
+        isolation_options = {} if isolation_root is None else {"isolation_root": isolation_root}
         futures: List[Future] = []
         for file in files:
             t0 = time.monotonic()
@@ -1391,6 +1457,7 @@ def main() -> int:
                     file, repo_root, args.file_timeout, timeout_durations
                 ),
                 args.file_retries,
+                **isolation_options,
             )
             fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
             futures.append(fut)
@@ -1462,7 +1529,7 @@ def main() -> int:
     clean_times = _clean_pass_durations(
         file_times, failures, _FLAKY_RESULTS,
     )
-    if clean_times:
+    if clean_times and isolation_root is None:
         _save_durations(clean_times, repo_root)
         print(f"  Durations cached to {_DURATIONS_FILE} ({len(clean_times)} files)")
 

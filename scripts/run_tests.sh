@@ -23,6 +23,13 @@
 #   scripts/run_tests.sh tests/foo.py -v --tb=long  # bare flags "just work"
 #   scripts/run_tests.sh -k 'pattern'               # value flags pass through too
 #   scripts/run_tests.sh tests/foo.py -- --tb=long  # explicit '--' still works
+#   HERMES_PYTHON=/qualified/python scripts/run_tests.sh --isolation-root /private/scratch tests/foo.py
+#     Opt-in scratch isolation; requires an existing private mode-0700 root and
+#     separately qualified Python 3.14 environment/OS sandbox. Does not activate
+#     dependencies, compile bytecode, sweep shared scratch or save duration caches.
+#     Scratch evidence is retained. This flag is NOT an OS sandbox or guard bypass.
+#     The mode pins pytest basetemp to a fresh attempt; inherited PYTEST_ADDOPTS
+#     and a second literal '--' in pytest arguments cannot override that location.
 #
 # Bare pytest flags (anything starting with '-' that isn't one of this
 # runner's own options: -j/--jobs, --paths, --slice, --file-timeout, etc.)
@@ -37,6 +44,37 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Recognize the opt-in BEFORE any environment activation or pytest import.
+# Keep argv intact for the parallel runner; respect its explicit separator and
+# value-taking flags (e.g. a -k value is not another runner option).
+ISOLATION_ROOT=""
+isolation_seen=0
+runner_args=("$@")
+for ((i=0; i<$#; i++)); do
+  case "${runner_args[i]}" in
+    --) break ;;
+    --isolation-root|--isolation-root=*)
+      if [ "$isolation_seen" = 1 ]; then
+        echo "error: --isolation-root may be specified only once" >&2
+        exit 2
+      fi
+      isolation_seen=1
+      if [ "${runner_args[i]}" = --isolation-root ]; then
+        i=$((i + 1))
+        ISOLATION_ROOT="${runner_args[i]:-}"
+      else
+        ISOLATION_ROOT="${runner_args[i]#--isolation-root=}"
+      fi
+      case "$ISOLATION_ROOT" in
+        /*) ;;
+        *) echo "error: --isolation-root requires an absolute canonical path" >&2; exit 2 ;;
+      esac
+      ;;
+    -k|-m|-p|-o|-c|-r|-W|-j|--jobs|--paths|--file-timeout|--file-retries|--slice|--generate-slices|--files|--files-from)
+      i=$((i + 1)) ;;
+  esac
+done
+
 # ── Locate python ───────────────────────────────────────────────────────────
 # The suite runs under the activated checkout's isolated test environment
 # (pm.testenv: `activate` builds it beside the checkout's install state, and CI
@@ -49,6 +87,28 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # one on purpose. The import check matters: a wrapped `hermes` binary exports
 # HERMES_PYTHON pointing at a release venv without pytest.
 _has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/null; }
+ISOLATION_ENV=()
+PYTHON_FLAGS=()
+if [ "$isolation_seen" = 1 ]; then
+  case "${HERMES_PYTHON:-}" in
+    /*) ;;
+    *) echo "error: isolation requires an explicit absolute HERMES_PYTHON; automatic activation is disabled" >&2; exit 2 ;;
+  esac
+  if [ ! -x "$HERMES_PYTHON" ] || [ -d "$HERMES_PYTHON" ]; then
+    echo "error: isolation requires an existing executable HERMES_PYTHON" >&2
+    exit 2
+  fi
+  PYTHON="$HERMES_PYTHON"
+  # -I -S keeps preflight stdlib-only, with no site hooks, pytest or guard import.
+  "$PYTHON" -I -S -B "$SCRIPT_DIR/run_tests_isolation.py" \
+    --root "$ISOLATION_ROOT" --repo-root "$REPO_ROOT" --expected-python "$PYTHON"
+  if ! env -i PATH="$PATH" HOME="$HOME" "$PYTHON" -s -B -c 'import pytest' 2>/dev/null; then
+    echo "error: qualified isolation interpreter has no usable pytest; no dependencies were activated" >&2
+    exit 2
+  fi
+  ISOLATION_ENV=("HERMES_PYTHON=$PYTHON" "PYTHONDONTWRITEBYTECODE=1" "PYTHONNOUSERSITE=1")
+  PYTHON_FLAGS=(-s -B)
+else
 # shellcheck source=scripts/_activation.sh
 . "$SCRIPT_DIR/_activation.sh"
 if [ -z "${__HERMES_ACTIVATED:-}" ] && _has_pytest "${HERMES_PYTHON:-}"; then
@@ -77,6 +137,7 @@ else
     echo "error: activation provided no test interpreter with pytest (__HERMES_TEST_PYTHON=${PYTHON:-unset})" >&2
     exit 1
   fi
+fi
 fi
 
 
@@ -180,8 +241,10 @@ cd "$REPO_ROOT"
 # Pre-building the bytecode cache once here (instead of each subprocess
 # compiling on first import) avoids redundant work across ~2000 processes.
 # Uses git to list tracked .py files (skips venv, node_modules, etc).
-echo "▶ pre-compiling bytecode cache"
-"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+if [ "$isolation_seen" = 0 ]; then
+  echo "▶ pre-compiling bytecode cache"
+  "$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+fi
 
 echo "▶ launching test runner"
 exec env -i \
@@ -189,6 +252,7 @@ exec env -i \
   HOME="$HOME" \
   ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
   ${TEST_ENV[@]+"${TEST_ENV[@]}"} \
+  ${ISOLATION_ENV[@]+"${ISOLATION_ENV[@]}"} \
   TZ=UTC \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
@@ -199,4 +263,4 @@ exec env -i \
   ${HERMES_RUN_E2E:+HERMES_RUN_E2E="$HERMES_RUN_E2E"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
-  "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+  "$PYTHON" ${PYTHON_FLAGS[@]+"${PYTHON_FLAGS[@]}"} "$SCRIPT_DIR/run_tests_parallel.py" "$@"
