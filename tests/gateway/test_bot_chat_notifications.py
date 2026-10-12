@@ -60,12 +60,17 @@ class FakeMailbox:
     def __init__(self):
         self.rows = {}
         self.admissions = []
+        self.attempts = []
         self.reads = []
         self.fail_after_store = False
         self.read_error = None
         self.transform = lambda receipt: receipt
+        self.before_boundary = lambda: None
 
-    def admit(self, envelope):
+    def admit(self, envelope, *, before_submit):
+        self.attempts.append(envelope)
+        self.before_boundary()
+        before_submit()
         self.admissions.append(envelope)
         result = MailboxReceipt(
             envelope.delivery_id, envelope.binding, envelope.payload_digest,
@@ -102,6 +107,9 @@ class FakeGate:
         ), **self.overrides)
         if self.exit_error is not None:
             raise self.exit_error
+
+    def revalidate(self, envelope, permit):
+        return replace(permit, **self.overrides)
 
 
 class BotChatNotificationTests(unittest.TestCase):
@@ -280,6 +288,189 @@ class BotChatNotificationTests(unittest.TestCase):
         self.assertEqual(self.mailbox.admissions, [])
         self.assertEqual(self.receipts.rows, {})
 
+    def test_expiry_after_durable_reservation_never_submits_and_replay_stays_terminal(self):
+        original_reserve = self.receipts.reserve
+        def delayed_reserve(key, receipt):
+            result = original_reserve(key, receipt)
+            self.now = 220.0
+            return result
+        self.receipts.reserve = delayed_reserve
+        notification = replace(self.notification, intent="wake")
+        arrival = self.wake_adapter().admit(self.caller, self.target, notification)
+        self.assertEqual(self.mailbox.admissions, [])
+        self.assertEqual(arrival.state.value, "not_submitted")
+        restarted = self.wake_adapter()
+        self.assertEqual(restarted.admit(self.caller, self.target, notification), arrival)
+        inspected = restarted.inspect(self.caller, self.target, notification.notification_id)
+        self.assertEqual(inspected.admission(), arrival)
+        self.assertEqual(self.mailbox.reads, [])
+        self.assertEqual(len(self.gate.entries), 1)
+        self.assertEqual(len(self.receipts.rows), 1)
+
+    def test_changed_gate_permission_after_reservation_is_not_stale_wake_authority(self):
+        original_reserve = self.receipts.reserve
+        def delayed_reserve(key, receipt):
+            result = original_reserve(key, receipt)
+            self.gate.overrides = {"budget_state": "unavailable"}
+            return result
+        self.receipts.reserve = delayed_reserve
+        arrival = self.wake_adapter().admit(self.caller, self.target, replace(self.notification, intent="wake"))
+        self.assertEqual(self.mailbox.admissions, [])
+        self.assertEqual(arrival.state.value, "not_submitted")
+
+    def test_delayed_mailbox_rechecks_at_its_actual_submission_boundary(self):
+        self.mailbox.before_boundary = lambda: setattr(self, "now", 220.0)
+        notification = replace(self.notification, intent="wake")
+        arrival = self.wake_adapter().admit(self.caller, self.target, notification)
+        self.assertEqual(self.mailbox.admissions, [])
+        self.assertEqual(len(self.mailbox.attempts), 1)
+        self.assertEqual(arrival.state.value, "not_submitted")
+        self.assertEqual(self.wake_adapter().admit(self.caller, self.target, notification), arrival)
+        self.assertEqual(len(self.mailbox.attempts), 1)
+
+    def test_blocking_reserve_crossing_all_deadlines_keeps_one_non_submission_record(self):
+        entered, release = threading.Event(), threading.Event()
+        class BlockingReceipts(MemoryReceipts):
+            def reserve(store, key, receipt):
+                result = super().reserve(key, receipt)
+                entered.set()
+                if not release.wait(timeout=3):
+                    raise RuntimeError("test release missing")
+                return result
+        receipts = BlockingReceipts()
+        adapter = self.wake_adapter(receipts=receipts)
+        notification = replace(self.notification, intent="wake")
+        results, errors = [], []
+        def admit():
+            try:
+                results.append(adapter.admit(self.caller, self.target, notification))
+            except Exception as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=admit)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(timeout=3))
+            self.now = 301.0
+        finally:
+            release.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(results[0].state, ReceiptState.NOT_SUBMITTED)
+        self.assertEqual(self.mailbox.attempts, [])
+        self.assertEqual(len(receipts.rows), 1)
+        self.assert_refused(RefusalCode.EXPIRED, lambda: self.wake_adapter(receipts=receipts).admit(
+            self.caller, self.target, notification,
+        ))
+        self.assertEqual(self.mailbox.admissions, [])
+
+    def test_both_dispatch_fences_use_current_grants_binding_and_same_reservation(self):
+        for stage in ("reserve", "mailbox"):
+            for change in ("notification", "binding-expiry", "grant-expiry", "binding-identity",
+                           "owner-opt-out", "grant-revoked", "budget", "capacity", "usage", "busy", "reservation"):
+                with self.subTest(stage=stage, change=change):
+                    case = BotChatNotificationTests("test_guarded_wake_and_status_follow_one_exact_receipt")
+                    case.setUp()
+                    adapter = case.wake_adapter()
+                    if change == "binding-expiry":
+                        adapter.registration = replace(adapter.registration,
+                            binding=replace(case.binding, expires_at=125.0))
+                    elif change == "grant-expiry":
+                        adapter.registration = replace(adapter.registration,
+                            grants=(replace(adapter.registration.grants[0], expires_at=125.0),))
+                    def mutate():
+                        if change == "notification":
+                            case.now = 200.0
+                        elif change in ("binding-expiry", "grant-expiry"):
+                            case.now = 125.0
+                        elif change == "binding-identity":
+                            adapter.registration = replace(adapter.registration,
+                                binding=replace(case.binding, lease_id="replacement-lease"))
+                        elif change == "owner-opt-out":
+                            adapter.registration = replace(adapter.registration, owner_opt_in=False)
+                        elif change == "grant-revoked":
+                            adapter.registration = replace(adapter.registration, grants=())
+                        else:
+                            field, value = {"budget": ("budget_state", "unavailable"),
+                                "capacity": ("capacity_state", "blocked"), "usage": ("usage_state", "blocked"),
+                                "busy": ("target_state", "busy"), "reservation": ("reservation_id", "new-reservation")}[change]
+                            case.gate.overrides = {field: value}
+                    if stage == "reserve":
+                        original = case.receipts.reserve
+                        def delayed(key, receipt):
+                            result = original(key, receipt)
+                            mutate()
+                            return result
+                        case.receipts.reserve = delayed
+                    else:
+                        case.mailbox.before_boundary = mutate
+                    notification = replace(case.notification, intent="wake")
+                    for _ in range(2):
+                        try:
+                            result = adapter.admit(case.caller, case.target, notification)
+                        except Refused:
+                            pass  # Revoked/changed binding cannot read the retained record either.
+                        else:
+                            self.assertIn(result.state, {ReceiptState.NOT_SUBMITTED, ReceiptState.UNKNOWN})
+                    self.assertEqual(case.mailbox.admissions, [])
+                    self.assertLessEqual(len(case.mailbox.attempts), 1)
+                    self.assertEqual(len(case.receipts.rows), 1)
+
+    def test_uncertain_non_submission_storage_and_callback_evidence_never_authorize_retry(self):
+        for mode in ("cas-failure", "cas-before-mailbox", "competing-claim", "omitted-callback",
+                     "swallowed-refusal", "after-authorization", "callback-reused"):
+            with self.subTest(mode=mode):
+                case = BotChatNotificationTests("test_guarded_wake_and_status_follow_one_exact_receipt")
+                case.setUp()
+                notification = replace(case.notification, intent="wake")
+                retained_callbacks = []
+                def ambiguous_mailbox(envelope, *, before_submit):
+                    case.mailbox.attempts.append(envelope)
+                    retained_callbacks.append(before_submit)
+                    if mode == "swallowed-refusal":
+                        case.now = 220.0
+                        try:
+                            before_submit()
+                        except Refused:
+                            pass
+                    elif mode in ("after-authorization", "callback-reused"):
+                        before_submit()
+                        if mode == "callback-reused":
+                            before_submit()
+                        case.mailbox.admissions.append(envelope)
+                        case.now = 220.0
+                        raise RuntimeError("unknown after actual fake submission")
+                    return MailboxReceipt(envelope.delivery_id, envelope.binding,
+                                          envelope.payload_digest, ReceiptState.QUEUED)
+                if mode in ("cas-failure", "cas-before-mailbox"):
+                    case.receipts.replace_error = OSError("simulated durable refusal write failed")
+                    if mode == "cas-before-mailbox":
+                        original_reserve = case.receipts.reserve
+                        def delayed_reserve(key, receipt):
+                            result = original_reserve(key, receipt)
+                            case.now = 220.0
+                            return result
+                        case.receipts.reserve = delayed_reserve
+                    else:
+                        case.mailbox.before_boundary = lambda: setattr(case, "now", 220.0)
+                elif mode == "competing-claim":
+                    case.mailbox.before_boundary = lambda: setattr(case, "now", 220.0)
+                    def competing_claim(key, expected, proposed):
+                        case.receipts.rows[key] = replace(expected, state=ReceiptState.CLAIMED)
+                    case.receipts.before_replace = competing_claim
+                else:
+                    case.mailbox.admit = ambiguous_mailbox
+                result = case.wake_adapter().admit(case.caller, case.target, notification)
+                self.assertEqual(result.state, ReceiptState.CLAIMED if mode == "competing-claim" else ReceiptState.UNKNOWN)
+                attempts = len(case.mailbox.attempts)
+                if mode == "cas-before-mailbox":
+                    self.assertEqual(attempts, 0)
+                self.assertEqual(case.wake_adapter().admit(case.caller, case.target, notification), result)
+                self.assertEqual(len(case.mailbox.attempts), attempts)
+                self.assertEqual(len(case.mailbox.admissions), int(mode == "after-authorization"))
+                for callback in retained_callbacks:
+                    case.assert_refused(RefusalCode.UNKNOWN, callback)
+
     def test_changed_payload_or_target_cannot_reuse_a_notification_uuid(self):
         self.adapter.admit(self.caller, self.target, self.notification)
         for changes in ({"text": self.notification.text + " "}, {"intent": "wake"}, {"expires_at": 201.0}):
@@ -434,6 +625,7 @@ class BotChatNotificationTests(unittest.TestCase):
             None, replace(valid, delivery_id="0" * 64), replace(valid, payload_digest="0" * 64),
             replace(valid, binding=replace(self.binding, live_session_id="different")),
             replace(valid, state=ReceiptState.STORED), replace(valid, state=ReceiptState.UNKNOWN),
+            replace(valid, state=ReceiptState.NOT_SUBMITTED),
             replace(valid, state="settled", result="private result from an invalid receipt"),
             replace(valid, state=ReceiptState.SETTLED, result=None),
         ]

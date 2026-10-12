@@ -32,6 +32,7 @@ class Permission(str, Enum):
 
 class ReceiptState(str, Enum):
     STORED = "stored"
+    NOT_SUBMITTED = "not_submitted"
     UNKNOWN = "unknown"
     QUEUED = "queued"
     CLAIMED = "claimed"
@@ -202,6 +203,8 @@ class ReceiptStore(Protocol):
     reserve returns (created, actual_receipt). It may not forget an uncertain or
     claimed record, or prune terminal deduplication keys into permission to rerun.
     It must enforce bounded receipt capacity atomically; fail before dispatch if full.
+    NOT_SUBMITTED is a retained local non-submission tombstone, never cancellation
+    of native work or permission to reuse/remint the notification UUID.
     Implementations may raise Refused(CAPACITY), or fail with STORAGE. No live store
     implementation is supplied in this source-only slice.
     """
@@ -213,7 +216,16 @@ class ReceiptStore(Protocol):
 
 
 class Mailbox(Protocol):
-    def admit(self, envelope: Envelope) -> MailboxReceipt: ...
+    """Trusted synchronous submitter; no mailbox side effect before the callback.
+
+    Invoke before_submit exactly once at the actual admission/commit boundary,
+    after any blocking preparation, and propagate its refusal without submitting.
+    Its returned permit is bound to this delivery and must be honored through
+    native claim together with expiry/owner/usage/budget checks. Do not retain the
+    callback or treat it as renewable authority. No native implementation exists.
+    """
+    def admit(self, envelope: Envelope, *,
+              before_submit: Callable[[], AdmissionPermit]) -> MailboxReceipt: ...
     def read(self, delivery_id: str) -> MailboxReceipt | None: ...
 
 
@@ -226,14 +238,22 @@ class AdmissionGate(Protocol):
     competing identical requests. This module does not implement those guarantees.
     """
     def hold(self, envelope: Envelope) -> ContextManager[AdmissionPermit]: ...
+    def revalidate(self, envelope: Envelope, permit: AdmissionPermit) -> AdmissionPermit:
+        """Freshly check the SAME held reservation, never acquire/renew another.
+
+        Recheck owner, capacity, usage and budget while the original guard is held.
+        The host must not echo an earlier permit as proof of current authority.
+        """
+        ...
 
 
-_TERMINAL = frozenset({ReceiptState.SETTLED, ReceiptState.FAILED,
-                       ReceiptState.CANCELLED, ReceiptState.AMBIGUOUS})
+_MAILBOX_TERMINAL = frozenset({ReceiptState.SETTLED, ReceiptState.FAILED,
+                               ReceiptState.CANCELLED, ReceiptState.AMBIGUOUS})
+_TERMINAL = _MAILBOX_TERMINAL | {ReceiptState.NOT_SUBMITTED}
 _NEXT = {
-    ReceiptState.UNKNOWN: _TERMINAL | {ReceiptState.QUEUED, ReceiptState.CLAIMED},
-    ReceiptState.QUEUED: _TERMINAL | {ReceiptState.CLAIMED},
-    ReceiptState.CLAIMED: _TERMINAL,
+    ReceiptState.UNKNOWN: _MAILBOX_TERMINAL | {ReceiptState.QUEUED, ReceiptState.CLAIMED},
+    ReceiptState.QUEUED: _MAILBOX_TERMINAL | {ReceiptState.CLAIMED},
+    ReceiptState.CLAIMED: _MAILBOX_TERMINAL,
 }
 _TARGET_REFUSALS = {
     "busy": RefusalCode.BUSY,
@@ -356,7 +376,7 @@ class BotChatNotifications:
                 or not isinstance(receipt.result_truncated, bool)
                 or receipt.evidence_kind != "injected-contract" or receipt.provider_budget_enforcement != "unverified"):
             raise Refused(RefusalCode.STORAGE)
-        if receipt.state not in _TERMINAL and (receipt.result or receipt.result_truncated):
+        if receipt.state not in _MAILBOX_TERMINAL and (receipt.result or receipt.result_truncated):
             raise Refused(RefusalCode.STORAGE)
         return receipt
 
@@ -389,7 +409,8 @@ class BotChatNotifications:
 
     @staticmethod
     def _permit(permit: AdmissionPermit, envelope: Envelope) -> None:
-        if (permit.binding != envelope.binding or permit.payload_digest != envelope.payload_digest
+        if (not isinstance(permit, AdmissionPermit)
+                or permit.binding != envelope.binding or permit.payload_digest != envelope.payload_digest
                 or permit.delivery_id != envelope.delivery_id):
             raise Refused(RefusalCode.STALE)
         if permit.target_state != "ready":
@@ -428,6 +449,42 @@ class BotChatNotifications:
             raise Refused(RefusalCode.STORAGE)
         return actual
 
+    def _not_submitted(self, receipt: Receipt) -> AdmissionReceipt:
+        """Retain this UUID after a known pre-submission refusal, never cancel work.
+
+        A failed/uncertain CAS keeps UNKNOWN. A competing verified mailbox state
+        wins over this proposed local terminal state; neither case permits retry.
+        """
+        try:
+            now = self.clock()
+            if not _timestamp(now):
+                now = receipt.updated_at
+            proposed = replace(receipt, state=ReceiptState.NOT_SUBMITTED,
+                               updated_at=max(now, receipt.updated_at))
+            key = receipt.caller.principal_id, receipt.caller.scope_id, receipt.notification_id
+            actual = self.receipts.replace(key, receipt, proposed)
+            self._check_receipt(actual, receipt.caller, receipt.notification_id)
+            self._replay(actual, self._envelope(receipt.caller, receipt.notification))
+            if actual == proposed or actual.state in _NEXT.get(receipt.state, frozenset()):
+                return actual.admission()
+        except Exception:
+            pass
+        return receipt.admission()
+
+    def _dispatch_authority(self, envelope: Envelope, target: TargetRef,
+                            permit: AdmissionPermit) -> tuple[float, AdmissionPermit]:
+        current = self.admission_gate.revalidate(envelope, permit)
+        if self.registration.binding != envelope.binding:
+            raise Refused(RefusalCode.STALE)
+        # Revalidation itself may block. Read the clock/grants AFTER it returns.
+        now = self._authorize(envelope.caller, target, frozenset({Permission.STORE, Permission.WAKE}))
+        if now >= envelope.notification.expires_at:
+            raise Refused(RefusalCode.EXPIRED)
+        self._permit(current, envelope)
+        if current.reservation_id != permit.reservation_id:
+            raise Refused(RefusalCode.BUDGET)
+        return now, current
+
     def _wake(self, envelope: Envelope, target: TargetRef) -> AdmissionReceipt:
         try:
             with self.admission_gate.hold(envelope) as permit:
@@ -438,13 +495,45 @@ class BotChatNotifications:
                 created, receipt = self._reserve(envelope, ReceiptState.UNKNOWN, now)
                 if not created:
                     return receipt.admission()
+                # A durable reserve may block beyond any admission deadline.
+                # Recheck before even invoking the wake-capable dependency.
+                try:
+                    now, _ = self._dispatch_authority(envelope, target, permit)
+                except Exception:
+                    return self._not_submitted(receipt)
                 # Reserve BEFORE dispatch. Even a callback that writes and then
                 # throws must never be invoked again for this notification UUID.
+                boundary_open, boundary_used, submission_authorized = True, False, False
+                boundary_refusal = None
+
+                def before_submit() -> AdmissionPermit:
+                    nonlocal boundary_used, submission_authorized, boundary_refusal, now
+                    if not boundary_open or boundary_used:
+                        raise Refused(RefusalCode.UNKNOWN)
+                    boundary_used = True
+                    try:
+                        now, current = self._dispatch_authority(envelope, target, permit)
+                    except Refused as exc:
+                        boundary_refusal = exc
+                        raise
+                    except Exception:
+                        boundary_refusal = Refused(RefusalCode.UNKNOWN)
+                        raise boundary_refusal from None
+                    submission_authorized = True
+                    return current
+
                 try:
-                    observed = self.mailbox.admit(envelope)
+                    observed = self.mailbox.admit(envelope, before_submit=before_submit)
+                    if not submission_authorized:
+                        raise Refused(RefusalCode.UNKNOWN)
                     receipt = self._project(receipt, observed, now)
-                except Exception:
-                    pass  # Retain UNKNOWN; only inspection can reconcile it.
+                except Exception as exc:
+                    if exc is boundary_refusal and not submission_authorized:
+                        return self._not_submitted(receipt)
+                    # No callback proof, a swallowed refusal, or any failure
+                    # after authorization remains UNKNOWN, not cancellation.
+                finally:
+                    boundary_open = False
                 return receipt.admission()
         except Refused:
             raise
@@ -457,6 +546,8 @@ class BotChatNotifications:
         A returned state describes the retained admission, not current native
         health. The same UUID with different content/target is always a conflict.
         'unknown' means inspect this exact UUID; never mint another to retry it.
+        'not_submitted' is a durable pre-submission refusal, not a native cancel.
+        Neither state authorizes another dispatch of this notification.
         """
         required = frozenset({Permission.STORE, Permission.WAKE} if notification.intent == "wake" else {Permission.STORE})
         now = self._authorize(caller, target, required)
