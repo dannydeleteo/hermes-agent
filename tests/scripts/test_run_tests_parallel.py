@@ -45,6 +45,7 @@ def _probe_root(tmp_path):
     (scripts / "ci").mkdir(parents=True, exist_ok=True)
     real = Path(__file__).resolve().parents[2] / "scripts"
     shutil.copy2(real / "run_tests_parallel.py", scripts)
+    shutil.copy2(real / "run_tests_isolation.py", scripts)
     # The runner shares the platforms() spec resolver with the CI lane selector.
     shutil.copy2(real / "ci" / "list_os_marked_tests.py", scripts / "ci")
     return root
@@ -590,3 +591,76 @@ def test_slices_partition_the_suite_exactly_even_with_different_duration_caches(
     slices = [rtp._slice_files(list(reversed(files)) if i % 2 else files, i % 3 + 1, 3, caches[i % 3], root)
               for i in range(3)]
     assert sorted(f for s in slices for f in s) == sorted(files)
+
+
+# Actual CLI/child integration cases: require the separately qualified runner,
+# protected guards, interpreter and OS sandbox. Fake-only preliminary probes
+# in test_run_tests_isolation.py do NOT establish acceptance of these cases.
+@pytest.mark.platforms("posix")
+@pytest.mark.skipif(sys.version_info[:2] != (3, 14), reason="isolated mode requires qualified Python 3.14")
+@pytest.mark.parametrize("case", ["missing-interpreter", "relative-root", "duplicate-root", "public-root"])
+def test_isolation_rejects_invalid_configuration_before_creating_attempts(tmp_path, case):
+    repo = _probe_root(tmp_path)
+    scratch = (tmp_path / "private-scratch").resolve()
+    scratch.mkdir(mode=0o700)
+    env = {key: value for key, value in os.environ.items() if key != "HERMES_PYTHON"}
+    arguments = ["--isolation-root", str(scratch)]
+    if case != "missing-interpreter":
+        env["HERMES_PYTHON"] = sys.executable
+    if case == "relative-root":
+        arguments = ["--isolation-root", "relative-scratch"]
+    elif case == "duplicate-root":
+        arguments += ["--isolation-root", str(scratch)]
+    elif case == "public-root":
+        scratch.chmod(0o755)
+    result = subprocess.run(
+        [sys.executable, "-s", "-B", str(repo / "scripts/run_tests_parallel.py"), *arguments, "-q"],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "isolation" in result.stderr
+    assert list(scratch.iterdir()) == []
+    assert not (repo / "test_durations.json").exists()
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.skipif(sys.version_info[:2] != (3, 14), reason="isolated mode requires qualified Python 3.14")
+def test_isolation_retains_distinct_attempts_and_does_not_retry_or_write_source_caches(tmp_path):
+    repo = _probe_root(tmp_path)
+    scratch = (tmp_path / "private-scratch").resolve()
+    scratch.mkdir(mode=0o700)
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    duration_cache = repo / "test_durations.json"
+    duration_cache.write_text('{"historical_unrelated_test.py": 12.5}\n', encoding="utf-8")
+    old_cache = duration_cache.read_bytes()
+    old_mtime = duration_cache.stat().st_mtime_ns
+    for label, outcome in (("pass", True), ("failure", False)):
+        (probe / f"test_{label}.py").write_text(
+            "import os, sys\nfrom pathlib import Path\n"
+            "def test_private_attempt(tmp_path):\n"
+            "    root = Path(os.environ['TMPDIR']).resolve()\n"
+            f"    assert root.parent == Path({str(scratch)!r})\n"
+            "    assert Path(os.environ['HERMES_GATEWAY_LOCK_DIR']).parent == root\n"
+            "    assert tmp_path.resolve().is_relative_to(root)\n"
+            f"    assert os.environ.get('HOME') == {os.environ.get('HOME')!r}\n"
+            "    assert sys.dont_write_bytecode\n"
+            f"    (root / 'witness.json').write_text({json.dumps({'label': label})!r})\n"
+            f"    assert {outcome!r}, 'intentional isolation canary failure'\n",
+            encoding="utf-8",
+        )
+    result = subprocess.run(
+        [sys.executable, "-s", "-B", str(repo / "scripts/run_tests_parallel.py"),
+         "--isolation-root", str(scratch), str(probe), "-j", "1", "--file-retries", "3", "--file-timeout", "30"],
+        cwd=repo, env={**os.environ, "HERMES_PYTHON": sys.executable, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True, text=True, timeout=90,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "1 tests passed, 1 failed" in result.stdout
+    attempts = list(scratch.iterdir())
+    assert len(attempts) == 2, "failure must not be retried or successful evidence removed"
+    assert {json.loads((path / "witness.json").read_text())["label"] for path in attempts} == {"pass", "failure"}
+    assert duration_cache.read_bytes() == old_cache
+    assert duration_cache.stat().st_mtime_ns == old_mtime
+    assert not (repo / ".pytest_cache").exists()
+    assert not (probe / "__pycache__").exists()
