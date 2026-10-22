@@ -985,9 +985,16 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
             payload["error_surface"] = _error_surface
     if st.terminal_callback is not None:
         st.receipt_attempted = True
+        failure_fields = {}
+        if status == "error":
+            if isinstance(result.get("failure_reason"), str) and result["failure_reason"]:
+                failure_fields["failure_reason"] = result["failure_reason"]
+            if isinstance(result.get("failure_retryable"), bool):
+                failure_fields["failure_retryable"] = result["failure_retryable"]
         st.terminal_callback({
             "status": {"interrupted": "cancelled", "error": "failed"}.get(status, "settled"),
             "text": raw if isinstance(raw, str) else str(raw),
+            **failure_fields,
             **({"error": str(error_value or raw)} if status == "error" else {})})
         st.receipt_committed = True
     if st.receipt_committed:

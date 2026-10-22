@@ -55,6 +55,26 @@ def test_delivery_is_idempotent_fenced_and_permanent(tmp_path, terminal_status):
             assert path.stat().st_mode & 0o077 == 0
 
 
+def test_typed_failure_receipt_is_immutable_and_legacy_completion_preserves_it(tmp_path):
+    from tools import bot_live_delivery as mailbox
+
+    owner = dict(profile_home=str(tmp_path.resolve()), session_id="chat",
+                 lease_id="lease", live_session_id="live")
+    queued = mailbox.deliver_to_live_owner(tmp_path, owner, "bounded task")
+    mailbox.claim_pending_delivery(tmp_path, owner)
+    fields = dict(status="failed", error="not admitted", reason="local_model_busy")
+    typed = dict(failure_reason="local_model_busy", failure_retryable=False)
+    receipt = mailbox.complete_delivery(tmp_path, queued["id"], **fields, **typed)
+    assert mailbox.read_delivery_result(tmp_path, queued["id"]) == receipt
+    assert mailbox.complete_delivery(tmp_path, queued["id"], **fields, **typed) == receipt
+    assert mailbox.complete_delivery(tmp_path, queued["id"], **fields) == receipt
+    for change in ({"failure_retryable": True}, {"failure_reason": "local_model_unavailable"}):
+        with pytest.raises(ValueError, match="different terminal receipt"):
+            mailbox.complete_delivery(tmp_path, queued["id"], **fields, **(typed | change))
+    assert mailbox.read_delivery_result(tmp_path, queued["id"]) == receipt
+    assert mailbox.claim_pending_delivery(tmp_path, owner) is None
+
+
 def test_cancel_queued_delivery_fences_claim_and_preserves_terminal_result(tmp_path):
     from tools import bot_live_delivery as mailbox
 

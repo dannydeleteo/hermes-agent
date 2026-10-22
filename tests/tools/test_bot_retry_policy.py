@@ -30,6 +30,24 @@ def test_context_overflow_compresses_then_resumes():
     assert bfr.retry_action(bfr.CONTEXT_OVERFLOW) == bfr.RETRY_COMPRESS_THEN_RESUME
 
 
+@pytest.mark.parametrize("reason", [
+    "local_model_busy", "local_model_recovery_required", "local_model_unavailable", "server_error",
+])
+def test_explicit_no_retry_overrides_transient_error_text(reason):
+    result = {"failed": True, "error": "HTTP 503: unavailable",
+              "failure_reason": reason, "failure_retryable": False}
+    assert bfr.result_retry_action(result) == bfr.RETRY_NONE
+
+
+@pytest.mark.parametrize("reason", [
+    "local_model_busy", "local_model_recovery_required", "local_model_unavailable",
+])
+def test_local_admission_reason_does_not_trigger_provider_retry(reason):
+    assert bfr.result_retry_action({
+        "failed": True, "error": "HTTP 503: unavailable", "failure_reason": reason,
+    }) == bfr.RETRY_NONE
+
+
 @pytest.mark.parametrize(
     "reason",
     [

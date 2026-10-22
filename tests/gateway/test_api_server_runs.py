@@ -10,6 +10,7 @@ Covers:
 """
 
 import asyncio
+from contextlib import ExitStack
 import hashlib
 import json
 import threading
@@ -1107,6 +1108,83 @@ class TestSteerRun:
 # ---------------------------------------------------------------------------
 # Run lifecycle TTL sweeping
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_owner", [False, True])
+@pytest.mark.parametrize(
+    "reason", ["local_model_busy", "local_model_recovery_required", "local_model_unavailable"]
+)
+async def test_failure_metadata_survives_events_status_and_restart(tmp_path, reason, live_owner):
+    """Clients must not guess whether a failed local request can be retried."""
+    path = tmp_path / "failure-status.db"
+    adapter = _make_adapter()
+    _use_idempotency_db(adapter, path)
+    app = _create_runs_app(adapter)
+    agent = MagicMock()
+    agent.run_conversation.return_value = {
+        "failed": True, "completed": False, "error": "Local request not admitted.",
+        "failure_reason": reason, "failure_retryable": False,
+    }
+    agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+    with ExitStack() as cleanup:
+        create = cleanup.enter_context(patch.object(adapter, "_create_agent", return_value=agent))
+        cleanup.callback(adapter._run_idempotency_store.close)
+        body = {"input": "one bounded task"}
+        if live_owner:
+            from hermes_cli.active_sessions import try_acquire_active_session
+            from hermes_state import SessionDB
+            from tools import bot_live_delivery as mailbox
+
+            db = adapter._session_db = SessionDB(db_path=tmp_path / "state.db")
+            cleanup.callback(db.close)
+            db.create_session(session_id="chat", source="cli")
+            db.set_session_title("chat", "Bot Chat")
+            lease, refusal = try_acquire_active_session(
+                session_id="chat", surface="desktop", config={}, registry_home=tmp_path,
+                metadata={"live_session_id": "live", "bot_live_delivery_consumer": True})
+            assert refusal is None and lease is not None
+            cleanup.callback(lease.release)
+            body["session_id"] = "chat"
+
+        async with TestClient(TestServer(app)) as cli:
+            started = await cli.post(
+                "/v1/runs", json=body,
+                headers={"Idempotency-Key": "failure-status"},
+            )
+            assert started.status == 202
+            run_id = (await started.json())["run_id"]
+            if live_owner:
+                owner = mailbox.find_canonical_live_owner(tmp_path)
+                claimed = mailbox.claim_pending_delivery(tmp_path, owner)
+                assert claimed is not None
+                mailbox.complete_delivery(
+                    tmp_path, claimed["id"], status="failed", error="Local request not admitted.",
+                    reason=reason, failure_reason=reason, failure_retryable=False)
+            events = await (await cli.get(f"/v1/runs/{run_id}/events")).text()
+            terminal = next(
+                json.loads(line.removeprefix("data: "))
+                for line in events.splitlines()
+                if line.startswith("data: ") and json.loads(line[6:]).get("event") == "run.failed"
+            )
+            status = await (await cli.get(f"/v1/runs/{run_id}")).json()
+            for response in (terminal, status):
+                assert response.get("failure_reason") == reason
+                assert response.get("failure_retryable") is False
+                assert response["completed"] is False
+            if live_owner:
+                create.assert_not_called()
+
+    restarted = _make_adapter()
+    _use_idempotency_db(restarted, path)
+    async with TestClient(TestServer(_create_runs_app(restarted))) as cli:
+        response = await cli.get(f"/v1/runs/{run_id}")
+        restored = await response.json()
+    restarted._run_idempotency_store.close()
+    assert response.status == 200
+    assert restored["status"] == "failed"
+    assert restored.get("failure_reason") == reason
+    assert restored.get("failure_retryable") is False
 
 
 class TestRunLifecycleSweep:
