@@ -46,6 +46,11 @@ def from_rules(protection: dict, pages: list) -> set:
 
 
 def repository_policy(api, repo: str, number: int, sha: str, branch: str, profile_home) -> tuple[set, dict]:
+    # A PR can be retargeted to an author-controlled feature branch. Only the
+    # repository's default branch supplies accepted fallback requirements.
+    metadata = api(f"repos/{repo}", profile_home=profile_home)
+    if not isinstance(metadata.get("default_branch"), str) or branch != metadata["default_branch"]:
+        raise FeatureUnavailable("Fallback CI policy requires the repository's accepted default branch.")
     current = api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
     base_sha = current["base"]["sha"]
     if current["head"]["sha"] != sha or current["base"]["ref"] != branch or not _SHA.fullmatch(base_sha):
