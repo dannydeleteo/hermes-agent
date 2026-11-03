@@ -1466,6 +1466,9 @@ Use the repository's actual required check names and app IDs. The declaration mu
 be independently reviewed and merged normally. The PR must target that default
 branch; retargeting to an author-controlled branch cannot supply policy. Hermes reads the file at a frozen
 base commit and validates its Git blob. A PR cannot approve its own proposed policy.
+The commit comes from the current default-branch Git reference; GitHub's PR base
+snapshot may predate a policy merge. Both the default reference and PR head/base
+are rechecked after collecting CI evidence, so concurrent movement fails closed.
 All listed checks, plus any known server requirements, must succeed at the exact
 PR head. Empty/missing/invalid policy, wrong app, incomplete evidence and changed
 head/base remain blocked. This does not create or pretend to enable GitHub branch

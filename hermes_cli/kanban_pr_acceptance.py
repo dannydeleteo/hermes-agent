@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-from hermes_cli.kanban_pr_requirements import FeatureUnavailable, from_rules, is_plan_restriction, repository_policy
+from hermes_cli.kanban_pr_requirements import FeatureUnavailable, accepted_branch_sha, from_rules, is_plan_restriction, repository_policy
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -182,7 +182,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
         if (current["head"]["sha"] != sha or current["base"]["ref"] != branch
-                or (receipt.get("required_policy") and current["base"].get("sha") != receipt["required_policy"]["base_sha"])
+                or (receipt.get("required_policy") and (
+                    current["base"].get("sha") != receipt["required_policy"]["pr_base_sha"]
+                    or accepted_branch_sha(_api, repo, branch, profile_home) != receipt["required_policy"]["base_sha"]))
                 or (current["state"] == "closed" and not current.get("merged"))):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
