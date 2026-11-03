@@ -1447,3 +1447,25 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
+
+### Private-plan branch-rule restrictions
+
+An explicit GitHub branch-rules plan restriction is `feature_unavailable`, not a
+request to sign in again. Genuine unauthorized, generic forbidden and repository
+not-found responses still fail closed. No raw `gh` error output is saved.
+
+When that exact feature restriction occurs, the repository may declare its required
+CI checks in `.github/kanban-required-checks.json` on the accepted base branch:
+
+```json
+{"schema":"hermes.kanban-required-checks.v1","base_branch":"main",
+ "required_checks":[{"context":"tests","app_id":15368}]}
+```
+
+Use the repository's actual required check names and app IDs. The declaration must
+be independently reviewed and merged normally. Hermes reads the file at a frozen
+base commit and validates its Git blob. A PR cannot approve its own proposed policy.
+All listed checks, plus any known server requirements, must succeed at the exact
+PR head. Empty/missing/invalid policy, wrong app, incomplete evidence and changed
+head/base remain blocked. This does not create or pretend to enable GitHub branch
+protection. Existing local merge, review and installation gates still apply.
