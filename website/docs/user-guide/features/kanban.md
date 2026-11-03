@@ -1455,7 +1455,7 @@ request to sign in again. Genuine unauthorized, generic forbidden and repository
 not-found responses still fail closed. No raw `gh` error output is saved.
 
 When that exact feature restriction occurs, the repository may declare its required
-CI checks in `.github/kanban-required-checks.json` on the accepted base branch:
+CI checks in `.github/kanban-required-checks.json` on the accepted default branch:
 
 ```json
 {"schema":"hermes.kanban-required-checks.v1","base_branch":"main",
@@ -1463,7 +1463,8 @@ CI checks in `.github/kanban-required-checks.json` on the accepted base branch:
 ```
 
 Use the repository's actual required check names and app IDs. The declaration must
-be independently reviewed and merged normally. Hermes reads the file at a frozen
+be independently reviewed and merged normally. The PR must target that default
+branch; retargeting to an author-controlled branch cannot supply policy. Hermes reads the file at a frozen
 base commit and validates its Git blob. A PR cannot approve its own proposed policy.
 All listed checks, plus any known server requirements, must succeed at the exact
 PR head. Empty/missing/invalid policy, wrong app, incomplete evidence and changed

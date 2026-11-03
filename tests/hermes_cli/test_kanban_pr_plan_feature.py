@@ -45,12 +45,15 @@ def test_base_owned_policy_keeps_required_ci_and_head_guards(monkeypatch, tmp_pa
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     sha, base = "a" * 40, "b" * 40
     for fault in [None, "missing_policy", "empty_policy", "bad_blob", "missing_check", "pending", "failure",
-                  "wrong_app", "partial_pages", "head_change", "base_change", "auth", "no_rules"]:
+                  "wrong_app", "partial_pages", "head_change", "base_change", "auth", "no_rules", "nondefault_base"]:
         state = {"checked": False, "requests": []}
+        branch = "author-branch" if fault == "nondefault_base" else "main"
         def api(endpoint, **kwargs):
             state["requests"].append(endpoint)
+            if endpoint == "repos/acme/repo":
+                return {"default_branch": "main"}
             if endpoint == "graphql":
-                return {"data": {"repository": {"pullRequest": {"headRefOid": sha, "baseRefName": "main",
+                return {"data": {"repository": {"pullRequest": {"headRefOid": sha, "baseRefName": branch,
                     "state": "OPEN", "baseRef": {"branchProtectionRule": None}}}}}
             if "/rules/branches/" in endpoint:
                 if fault == "no_rules":
@@ -79,7 +82,7 @@ def test_base_owned_policy_keeps_required_ci_and_head_guards(monkeypatch, tmp_pa
             if "/pulls/" in endpoint:
                 return {"head": {"sha": "c" * 40 if state["checked"] and fault == "head_change" else sha},
                         "base": {"sha": "d" * 40 if state["checked"] and fault == "base_change" else base,
-                                 "ref": "main"}, "state": "open"}
+                                 "ref": branch}, "state": "open"}
             raise AssertionError(endpoint)
         monkeypatch.setattr(gate, "_api", api)
         result = gate.collect_acceptance("acme/repo", "https://github.com/acme/repo/pull/7")
@@ -87,7 +90,7 @@ def test_base_owned_policy_keeps_required_ci_and_head_guards(monkeypatch, tmp_pa
         if fault is None:
             assert {c["name"] for c in result["checks"]} == {"python", "node"}
             assert result["required_policy"]["base_sha"] == base
-        if fault in {"missing_policy", "empty_policy", "bad_blob"}:
+        if fault in {"missing_policy", "empty_policy", "bad_blob", "nondefault_base"}:
             assert result["classification"] == "feature_unavailable"
         if fault in {"head_change", "base_change"}:
             assert result["classification"] == "stale"
