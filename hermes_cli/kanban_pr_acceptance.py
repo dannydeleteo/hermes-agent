@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
+from hermes_cli.kanban_pr_requirements import FeatureUnavailable, from_rules, is_plan_restriction, repository_policy
+
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
 
@@ -45,7 +47,9 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
         # code + endpoint, never gh's stderr (credentials/host details).
         denied = re.search(r"HTTP (40[134])", exc.stderr or "")
         if denied:
-            raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}") from None
+            if denied[1] == "403" and is_plan_restriction(endpoint, exc.stdout):
+                raise FeatureUnavailable("GitHub branch rules are unavailable on this repository plan.") from None
+            raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}", http_status=int(denied[1])) from None
         if exc.returncode == 4:  # gh's authentication-required exit: this profile has no login
             raise _GateAuthError(f"gh has no login for {endpoint.split('?')[0]}") from None
         raise
@@ -59,6 +63,10 @@ class _GateAuthError(RuntimeError):
     """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
     this profile's login cannot see the repo — an identity problem to fix, not
     an infrastructure blip to retry."""
+
+    def __init__(self, message: str, *, http_status: int | None = None):
+        super().__init__(message)
+        self.http_status = http_status
 
 
 def _gh_env(profile_home: str | None) -> dict[str, str] | None:
@@ -134,14 +142,13 @@ def collect_acceptance(contract: str, published_pr: str | None,
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
             raise ValueError("PR is closed or current head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
-        required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                     paginate=True, profile_home=profile_home)
-        for page in rules:
-            for rule in page:
-                if rule["type"] == "required_status_checks":
-                    required.update((r["context"], r.get("integration_id"))
-                                    for r in rule["parameters"]["required_status_checks"])
+        try:
+            rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
+                         paginate=True, profile_home=profile_home)
+            required = from_rules(protection, rules)
+        except FeatureUnavailable:
+            required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home)
+            required.update(from_rules(protection, []))
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
@@ -174,11 +181,19 @@ def collect_acceptance(contract: str, published_pr: str | None,
                     "classification": classification, "conclusion": outcome})
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
-        if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
+        if (current["head"]["sha"] != sha or current["base"]["ref"] != branch
+                or (receipt.get("required_policy") and current["base"].get("sha") != receipt["required_policy"]["base_sha"])
+                or (current["state"] == "closed" and not current.get("merged"))):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
+        return receipt
+    except FeatureUnavailable as exc:
+        receipt.update(classification="feature_unavailable", detail=str(exc),
+                       recovery="Keep the PR contract. Have the repository owner publish explicit required checks "
+                                "in .github/kanban-required-checks.json on the accepted base branch, then retry "
+                                "with exact-head CI. Do not change credentials or treat absent rules as approval.")
         return receipt
     except _GateAuthError as exc:
         login = f"assignee profile {assignee!r}'s gh login" if assignee else "the ambient gh login"
