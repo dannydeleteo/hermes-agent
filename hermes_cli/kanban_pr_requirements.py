@@ -9,6 +9,7 @@ import base64
 import hashlib
 import json
 import re
+from urllib.parse import quote
 
 POLICY_PATH = ".github/kanban-required-checks.json"
 _PLAN_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature."
@@ -45,15 +46,24 @@ def from_rules(protection: dict, pages: list) -> set:
     return required
 
 
-def repository_policy(api, repo: str, number: int, sha: str, branch: str, profile_home) -> tuple[set, dict]:
+def accepted_branch_sha(api, repo: str, branch: str, profile_home) -> str:
     # A PR can be retargeted to an author-controlled feature branch. Only the
     # repository's default branch supplies accepted fallback requirements.
     metadata = api(f"repos/{repo}", profile_home=profile_home)
     if not isinstance(metadata.get("default_branch"), str) or branch != metadata["default_branch"]:
         raise FeatureUnavailable("Fallback CI policy requires the repository's accepted default branch.")
+    ref = api(f"repos/{repo}/git/ref/heads/{quote(branch, safe='')}", profile_home=profile_home)
+    if ref["ref"] != f"refs/heads/{branch}" or ref["object"]["type"] != "commit" or not _SHA.fullmatch(ref["object"]["sha"]):
+        raise ValueError("Accepted default branch commit is unavailable")
+    return ref["object"]["sha"]
+
+
+def repository_policy(api, repo: str, number: int, sha: str, branch: str, profile_home) -> tuple[set, dict]:
+    # PR base.sha can remain the creation-time snapshot after main advances.
+    base_sha = accepted_branch_sha(api, repo, branch, profile_home)
     current = api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
-    base_sha = current["base"]["sha"]
-    if current["head"]["sha"] != sha or current["base"]["ref"] != branch or not _SHA.fullmatch(base_sha):
+    pr_base_sha = current["base"]["sha"]
+    if current["head"]["sha"] != sha or current["base"]["ref"] != branch or not _SHA.fullmatch(pr_base_sha):
         raise ValueError("PR changed before reading accepted policy")
     endpoint = f"repos/{repo}/contents/{POLICY_PATH}?ref={base_sha}"
     try:
@@ -84,4 +94,4 @@ def repository_policy(api, repo: str, number: int, sha: str, branch: str, profil
             required.add((context, app_id))
     except (ValueError, KeyError, TypeError, AttributeError):
         raise FeatureUnavailable("Accepted repository CI policy is invalid or incomplete.") from None
-    return required, {"path": POLICY_PATH, "base_sha": base_sha, "blob_sha": blob}
+    return required, {"path": POLICY_PATH, "base_sha": base_sha, "pr_base_sha": pr_base_sha, "blob_sha": blob}
