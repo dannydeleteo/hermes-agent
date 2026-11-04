@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-from hermes_cli.kanban_pr_requirements import FeatureUnavailable, accepted_branch_sha, from_rules, is_plan_restriction, repository_policy
+from hermes_cli.kanban_pr_requirements import FeatureUnavailable, PM_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, repository_policy
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -149,20 +149,29 @@ def collect_acceptance(contract: str, published_pr: str | None,
         except FeatureUnavailable:
             required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home)
             required.update(from_rules(protection, []))
+        # The PM declaration is authoritative even if plan rules later become
+        # readable. Actual server requirements are still unioned, never removed.
+        if repo == PM_LOCAL_STATUS_REPO and "required_policy" not in receipt:
+            declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home)
+            required.update(declared)
+        commit_statuses = receipt.get("required_policy", {}).get("commit_statuses", {})
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
             return receipt
-        pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
-                     paginate=True, profile_home=profile_home)
-        runs = [run for page in pages for run in page["check_runs"]]
-        if len({r["id"] for r in runs}) != pages[0]["total_count"]:
-            raise ValueError("Incomplete check-run pagination")
-        statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
+        runs = []
+        if any(not (a is None and c in commit_statuses) for c, a in required):
+            pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
+                         paginate=True, profile_home=profile_home)
+            runs = [run for page in pages for run in page["check_runs"]]
+            if len({r["id"] for r in runs}) != pages[0]["total_count"]:
+                raise ValueError("Incomplete check-run pagination")
+        statuses = [{**s, "sha": s.get("sha", sha)} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
         outcomes = []
         for context, app_id in sorted(required, key=str):
-            matching = [r for r in runs if r["name"] == context and
+            status_creator = commit_statuses.get(context) if app_id is None else None
+            matching = [] if status_creator else [r for r in runs if r["name"] == context and
                         (app_id in (None, -1) or r["app"]["id"] == app_id)]
             # A legacy status can satisfy an unpinned context, but never a check pinned to an app.
             legacy = [s for s in statuses if s["context"] == context] if app_id in (None, -1) else []
@@ -174,11 +183,19 @@ def collect_acceptance(contract: str, published_pr: str | None,
                 is_run = "conclusion" in check
                 outcome = check.get("conclusion") if is_run else check["state"]
                 classification = _classify(check, sha, outcome, is_run)
+                # A check run (even a successful Actions job with the same name)
+                # cannot impersonate the declared owner-created commit status.
+                if status_creator and (is_run or type(check.get("id")) is not int or check["id"] <= 0
+                        or (check.get("creator") or {}).get("login") != status_creator
+                        or check.get("url") != f"https://api.github.com/repos/{repo}/statuses/{sha}"):
+                    classification = "failure"
+
                 outcomes.append(classification)
                 receipt["checks"].append({"name": context, "id": check["id"],
                     "url": check.get("html_url") or check.get("target_url"),
                     "head_sha": check.get("head_sha", check.get("sha")),
-                    "classification": classification, "conclusion": outcome})
+                    "classification": classification, "conclusion": outcome,
+                    **({"kind": "commit_status", "creator_login": (check.get("creator") or {}).get("login")} if status_creator else {})})
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
         if (current["head"]["sha"] != sha or current["base"]["ref"] != branch

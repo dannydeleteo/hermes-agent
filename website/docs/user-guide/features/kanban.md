@@ -1473,3 +1473,43 @@ All listed checks, plus any known server requirements, must succeed at the exact
 PR head. Empty/missing/invalid policy, wrong app, incomplete evidence and changed
 head/base remain blocked. This does not create or pretend to enable GitHub branch
 protection. Existing local merge, review and installation gates still apply.
+
+
+### PM releases: declared local merge-result status
+
+Corey's November 4, 2026 direction makes GitHub-hosted `python` and `node` jobs
+advisory for `dannydeleteo/greekfire-pm-desk`. It does not remove review, local
+tests or the sole installer. Only this repository may use the following accepted
+policy; other repositories retain the v1 app-pinned rules above:
+
+```json
+{
+  "schema": "hermes.kanban-required-checks.v2",
+  "repository": "dannydeleteo/greekfire-pm-desk",
+  "base_branch": "main",
+  "required_checks": [
+    {"context": "local-gate", "kind": "commit_status", "creator_login": "dannydeleteo"}
+  ],
+  "advisory_checks": [
+    {"context": "python", "app_id": 15368},
+    {"context": "node", "app_id": 15368}
+  ]
+}
+```
+
+The normal serial merge gate first verifies independent exact-head approval and
+runs the full Python and Node suites on the fresh local merge result, then posts
+its real `local-gate` status. It may not manufacture hosted job success. Kanban
+requires the newest real commit status from the declared creator, at the exact
+head's REST status URL. Missing, pending, failed, wrong-head or wrong-creator
+statuses refuse. A successful check run with the same name cannot substitute.
+Advisory Actions jobs are not queried solely to satisfy this policy; any actual
+server-required check remains mandatory and app-pinned.
+
+Hermes reads and hash-verifies the current accepted default-branch policy even
+when branch-rule APIs are readable, and rechecks head/base/default reference
+before completion. A proposed policy cannot admit itself, an empty declaration
+is not approval, and changing a PR card to `local-only` is not this migration.
+Completion receipts record the status kind/creator and declared advisory checks.
+They attest source handoff, not installation or financial/data qualification.
+Root retains the canonical merge gate, guarded sole installation and owner manual.
