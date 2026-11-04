@@ -141,3 +141,14 @@ def test_sqlite_completion_persists_truthful_status_and_retains_reclaimed_run_fe
         assert not kb.complete_task(conn,tid,result='Old worker completion',expected_run_id=run_id,metadata={'published_pr':f'https://github.com/{REPO}/pull/7'})
         assert kb.get_task(conn,tid).status != 'done'
         assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='pr_acceptance'",(tid,)).fetchone()[0] == 0
+
+
+def test_old_reader_new_parser_pair_refuses_v2_until_status_provenance_is_understood():
+    from hermes_cli.kanban_pr_requirements import repository_policy
+    # The installed old collector calls without the new capability keyword.
+    # Promotion of the parser first must refuse rather than accidentally treat
+    # the typed status as its old unpinned-context/check-run alternative.
+    with pytest.raises(FeatureUnavailable):
+        repository_policy(GitHub(),REPO,7,HEAD,'main',None)
+    required, metadata = repository_policy(GitHub(),REPO,7,HEAD,'main',None,allow_commit_status=True)
+    assert required == {('local-gate',None)} and metadata['commit_statuses'] == {'local-gate':'dannydeleteo'}

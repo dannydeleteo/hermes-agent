@@ -147,12 +147,12 @@ def collect_acceptance(contract: str, published_pr: str | None,
                          paginate=True, profile_home=profile_home)
             required = from_rules(protection, rules)
         except FeatureUnavailable:
-            required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home)
+            required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
             required.update(from_rules(protection, []))
         # The PM declaration is authoritative even if plan rules later become
         # readable. Actual server requirements are still unioned, never removed.
         if repo == PM_LOCAL_STATUS_REPO and "required_policy" not in receipt:
-            declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home)
+            declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
             required.update(declared)
         commit_statuses = receipt.get("required_policy", {}).get("commit_statuses", {})
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]

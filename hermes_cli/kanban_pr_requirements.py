@@ -82,7 +82,7 @@ def _pm_local_status_policy(policy: dict, repo: str, branch: str) -> tuple[set, 
         "commit_statuses": {"local-gate": "dannydeleteo"}, "advisory_checks": advisory}
 
 
-def repository_policy(api, repo: str, number: int, sha: str, branch: str, profile_home) -> tuple[set, dict]:
+def repository_policy(api, repo: str, number: int, sha: str, branch: str, profile_home, *, allow_commit_status=False) -> tuple[set, dict]:
     # PR base.sha can remain the creation-time snapshot after main advances.
     base_sha = accepted_branch_sha(api, repo, branch, profile_home)
     current = api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
@@ -107,6 +107,10 @@ def repository_policy(api, repo: str, number: int, sha: str, branch: str, profil
         policy = json.loads(raw)
         policy_metadata = {}
         if policy.get("schema") == "hermes.kanban-required-checks.v2":
+            # Old installed collectors do not verify typed status provenance.
+            # A parser-first promotion must refuse until that reader is updated.
+            if not allow_commit_status:
+                raise ValueError("Reader does not support commit-status provenance")
             required, policy_metadata = _pm_local_status_policy(policy, repo, branch)
         else:
             checks = policy["required_checks"]
