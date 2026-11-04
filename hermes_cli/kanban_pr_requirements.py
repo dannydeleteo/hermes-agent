@@ -12,6 +12,7 @@ import re
 from urllib.parse import quote
 
 POLICY_PATH = ".github/kanban-required-checks.json"
+PM_LOCAL_STATUS_REPO = "dannydeleteo/greekfire-pm-desk"
 _PLAN_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature."
 _RULES = re.compile(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rules/branches/[^?]+(?:\?.*)?")
 _SHA = re.compile(r"[0-9a-f]{40}")
@@ -58,7 +59,30 @@ def accepted_branch_sha(api, repo: str, branch: str, profile_home) -> str:
     return ref["object"]["sha"]
 
 
-def repository_policy(api, repo: str, number: int, sha: str, branch: str, profile_home) -> tuple[set, dict]:
+def _pm_local_status_policy(policy: dict, repo: str, branch: str) -> tuple[set, dict]:
+    """Owner-declared PM exception; v1 and every other repository stay app-pinned."""
+    expected = [{"context": "local-gate", "kind": "commit_status", "creator_login": "dannydeleteo"}]
+    if (repo != PM_LOCAL_STATUS_REPO or branch != "main"
+            or set(policy) != {"schema", "repository", "base_branch", "required_checks", "advisory_checks"}
+            or policy["repository"] != repo or policy["base_branch"] != branch
+            or policy["required_checks"] != expected):
+        raise ValueError("Unsupported or ambiguous local-status policy")
+    advisory = policy["advisory_checks"]
+    if not isinstance(advisory, list) or len(advisory) > 50:
+        raise ValueError("Invalid advisory checks")
+    seen = set()
+    for check in advisory:
+        if (not isinstance(check, dict) or set(check) != {"context", "app_id"}
+                or not isinstance(check["context"], str) or not check["context"].strip()
+                or len(check["context"]) > 200 or check["context"] in seen
+                or check["context"] == "local-gate" or type(check["app_id"]) is not int or check["app_id"] <= 0):
+            raise ValueError("Invalid advisory provenance")
+        seen.add(check["context"])
+    return {("local-gate", None)}, {"schema": policy["schema"],
+        "commit_statuses": {"local-gate": "dannydeleteo"}, "advisory_checks": advisory}
+
+
+def repository_policy(api, repo: str, number: int, sha: str, branch: str, profile_home, *, allow_commit_status=False) -> tuple[set, dict]:
     # PR base.sha can remain the creation-time snapshot after main advances.
     base_sha = accepted_branch_sha(api, repo, branch, profile_home)
     current = api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
@@ -81,17 +105,25 @@ def repository_policy(api, repo: str, number: int, sha: str, branch: str, profil
         if len(raw) != item["size"] or item["sha"] != blob:
             raise ValueError
         policy = json.loads(raw)
-        checks = policy["required_checks"]
-        if (policy["schema"] != "hermes.kanban-required-checks.v1" or policy["base_branch"] != branch
-                or not isinstance(checks, list) or not 0 < len(checks) <= 50):
-            raise ValueError
-        required = set()
-        for check in checks:
-            context, app_id = check["context"], check["app_id"]
-            if (not isinstance(context, str) or not context.strip() or len(context) > 200
-                    or type(app_id) is not int or app_id <= 0 or any(c == context for c, _ in required)):
+        policy_metadata = {}
+        if policy.get("schema") == "hermes.kanban-required-checks.v2":
+            # Old installed collectors do not verify typed status provenance.
+            # A parser-first promotion must refuse until that reader is updated.
+            if not allow_commit_status:
+                raise ValueError("Reader does not support commit-status provenance")
+            required, policy_metadata = _pm_local_status_policy(policy, repo, branch)
+        else:
+            checks = policy["required_checks"]
+            if (policy["schema"] != "hermes.kanban-required-checks.v1" or policy["base_branch"] != branch
+                    or not isinstance(checks, list) or not 0 < len(checks) <= 50):
                 raise ValueError
-            required.add((context, app_id))
+            required = set()
+            for check in checks:
+                context, app_id = check["context"], check["app_id"]
+                if (not isinstance(context, str) or not context.strip() or len(context) > 200
+                        or type(app_id) is not int or app_id <= 0 or any(c == context for c, _ in required)):
+                    raise ValueError
+                required.add((context, app_id))
     except (ValueError, KeyError, TypeError, AttributeError):
         raise FeatureUnavailable("Accepted repository CI policy is invalid or incomplete.") from None
-    return required, {"path": POLICY_PATH, "base_sha": base_sha, "pr_base_sha": pr_base_sha, "blob_sha": blob}
+    return required, {"path": POLICY_PATH, "base_sha": base_sha, "pr_base_sha": pr_base_sha, "blob_sha": blob, **policy_metadata}
