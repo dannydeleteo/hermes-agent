@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-from hermes_cli.kanban_pr_requirements import FeatureUnavailable, PM_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, repository_policy
+from hermes_cli.kanban_pr_requirements import FeatureUnavailable, PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, repository_policy
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -149,9 +149,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
         except FeatureUnavailable:
             required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
             required.update(from_rules(protection, []))
-        # The PM declaration is authoritative even if plan rules later become
-        # readable. Actual server requirements are still unioned, never removed.
-        if repo == PM_LOCAL_STATUS_REPO and "required_policy" not in receipt:
+        # Both declarations apply even when plan rules become readable. Woodshed
+        # has no advisory exemption; union every real server requirement.
+        if repo in {PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO} and "required_policy" not in receipt:
             declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
             required.update(declared)
         commit_statuses = receipt.get("required_policy", {}).get("commit_statuses", {})
