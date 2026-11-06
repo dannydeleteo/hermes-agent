@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 POLICY_PATH = ".github/kanban-required-checks.json"
 PM_LOCAL_STATUS_REPO = "dannydeleteo/greekfire-pm-desk"
+WOODSHED_LOCAL_STATUS_REPO = "dannydeleteo/woodshed"
 _PLAN_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature."
 _RULES = re.compile(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rules/branches/[^?]+(?:\?.*)?")
 _SHA = re.compile(r"[0-9a-f]{40}")
@@ -82,6 +83,18 @@ def _pm_local_status_policy(policy: dict, repo: str, branch: str) -> tuple[set, 
         "commit_statuses": {"local-gate": "dannydeleteo"}, "advisory_checks": advisory}
 
 
+def _woodshed_local_status_policy(policy: dict, repo: str, branch: str) -> tuple[set, dict]:
+    """Encode Woodshed's existing local gate without any hosted-check exemption."""
+    expected = [{"context": "local-gate", "kind": "commit_status", "creator_login": "dannydeleteo"}]
+    if (repo != WOODSHED_LOCAL_STATUS_REPO or branch != "main"
+            or set(policy) != {"schema", "repository", "base_branch", "required_checks"}
+            or policy["repository"] != repo or policy["base_branch"] != branch
+            or policy["required_checks"] != expected):
+        raise ValueError("Unsupported or ambiguous Woodshed local-status policy")
+    return {("local-gate", None)}, {"schema": policy["schema"],
+        "commit_statuses": {"local-gate": "dannydeleteo"}}
+
+
 def repository_policy(api, repo: str, number: int, sha: str, branch: str, profile_home, *, allow_commit_status=False) -> tuple[set, dict]:
     # PR base.sha can remain the creation-time snapshot after main advances.
     base_sha = accepted_branch_sha(api, repo, branch, profile_home)
@@ -112,6 +125,10 @@ def repository_policy(api, repo: str, number: int, sha: str, branch: str, profil
             if not allow_commit_status:
                 raise ValueError("Reader does not support commit-status provenance")
             required, policy_metadata = _pm_local_status_policy(policy, repo, branch)
+        elif policy.get("schema") == "hermes.kanban-required-checks.woodshed-local.v1":
+            if not allow_commit_status:
+                raise ValueError("Reader does not support commit-status provenance")
+            required, policy_metadata = _woodshed_local_status_policy(policy, repo, branch)
         else:
             checks = policy["required_checks"]
             if (policy["schema"] != "hermes.kanban-required-checks.v1" or policy["base_branch"] != branch
