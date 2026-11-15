@@ -14,6 +14,7 @@ from urllib.parse import quote
 POLICY_PATH = ".github/kanban-required-checks.json"
 PM_LOCAL_STATUS_REPO = "dannydeleteo/greekfire-pm-desk"
 WOODSHED_LOCAL_STATUS_REPO = "dannydeleteo/woodshed"
+_OWNER_LOCAL_REPO = re.compile(r"dannydeleteo/[A-Za-z0-9_.-]+")
 _PLAN_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature."
 _RULES = re.compile(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rules/branches/[^?]+(?:\?.*)?")
 _SHA = re.compile(r"[0-9a-f]{40}")
@@ -21,6 +22,15 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 
 class FeatureUnavailable(RuntimeError):
     """A known plan restriction, or unavailable explicit accepted CI policy."""
+
+
+class MissingPolicy(FeatureUnavailable):
+    """The accepted policy file is absent, not malformed or unauthorized."""
+
+
+def owner_local_policy_candidate(repo: str) -> bool:
+    """The owner's current/future projects; never a third-party exemption."""
+    return bool(_OWNER_LOCAL_REPO.fullmatch(repo))
 
 
 def is_plan_restriction(endpoint: str, stdout: str | None) -> bool:
@@ -60,10 +70,10 @@ def accepted_branch_sha(api, repo: str, branch: str, profile_home) -> str:
     return ref["object"]["sha"]
 
 
-def _pm_local_status_policy(policy: dict, repo: str, branch: str) -> tuple[set, dict]:
-    """Owner-declared PM exception; v1 and every other repository stay app-pinned."""
+def _owner_local_status_policy(policy: dict, repo: str, branch: str) -> tuple[set, dict]:
+    """Owner-declared all-project fallback, bound to the accepted default ref."""
     expected = [{"context": "local-gate", "kind": "commit_status", "creator_login": "dannydeleteo"}]
-    if (repo != PM_LOCAL_STATUS_REPO or branch != "main"
+    if (not owner_local_policy_candidate(repo)
             or set(policy) != {"schema", "repository", "base_branch", "required_checks", "advisory_checks"}
             or policy["repository"] != repo or policy["base_branch"] != branch
             or policy["required_checks"] != expected):
@@ -107,7 +117,7 @@ def repository_policy(api, repo: str, number: int, sha: str, branch: str, profil
         item = api(endpoint, profile_home=profile_home)
     except RuntimeError as exc:
         if getattr(exc, "http_status", None) == 404:
-            raise FeatureUnavailable("Accepted repository CI policy is missing.") from None
+            raise MissingPolicy("Accepted repository CI policy is missing.") from None
         raise
     try:
         if (item["type"] != "file" or item["encoding"] != "base64" or item["path"] != POLICY_PATH
@@ -124,7 +134,7 @@ def repository_policy(api, repo: str, number: int, sha: str, branch: str, profil
             # A parser-first promotion must refuse until that reader is updated.
             if not allow_commit_status:
                 raise ValueError("Reader does not support commit-status provenance")
-            required, policy_metadata = _pm_local_status_policy(policy, repo, branch)
+            required, policy_metadata = _owner_local_status_policy(policy, repo, branch)
         elif policy.get("schema") == "hermes.kanban-required-checks.woodshed-local.v1":
             if not allow_commit_status:
                 raise ValueError("Reader does not support commit-status provenance")

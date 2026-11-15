@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-from hermes_cli.kanban_pr_requirements import FeatureUnavailable, PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, repository_policy
+from hermes_cli.kanban_pr_requirements import FeatureUnavailable, MissingPolicy, PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, owner_local_policy_candidate, repository_policy
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -149,11 +149,24 @@ def collect_acceptance(contract: str, published_pr: str | None,
         except FeatureUnavailable:
             required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
             required.update(from_rules(protection, []))
-        # Both declarations apply even when plan rules become readable. Woodshed
-        # has no advisory exemption; union every real server requirement.
-        if repo in {PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO} and "required_policy" not in receipt:
-            declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
-            required.update(declared)
+        # Accepted owner declarations apply even when rules become readable.
+        # Missing optional declarations cannot erase genuine server requirements;
+        # malformed declarations never fall back, and empty evidence never passes.
+        if owner_local_policy_candidate(repo) and "required_policy" not in receipt:
+            metadata = _api(f"repos/{repo}", profile_home=profile_home)
+            default_branch = metadata.get("default_branch")
+            if not isinstance(default_branch, str) or not default_branch:
+                raise ValueError("Accepted default branch is unavailable")
+            # Stacked targets retain their real server gate; never load a policy
+            # from an author-controlled feature branch as fallback authority.
+            if branch == default_branch:
+                try:
+                    declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
+                except MissingPolicy:
+                    if not required or repo in {PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO}:
+                        raise
+                else:
+                    required.update(declared)
         commit_statuses = receipt.get("required_policy", {}).get("commit_statuses", {})
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
