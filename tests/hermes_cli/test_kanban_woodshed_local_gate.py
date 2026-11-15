@@ -55,28 +55,32 @@ class GitHub:
                 runs = []
             return [{'total_count': len(runs), 'check_runs': runs}]
         if '/statuses?' in endpoint:
-            self.checked = True
-            status = {'id': 9, 'context': 'local-gate', 'state': fault if fault in ('pending', 'failure', 'error') else 'success',
-                      'creator': {'login': 'other' if fault == 'wrong_creator' else 'dannydeleteo'},
-                      'url': f'https://api.github.com/repos/{REPO}/statuses/{HEAD}'}
-            if fault in ('missing', 'check_run_only'):
-                return [[]]
-            if fault == 'wrong_head': status['sha'] = 'c'*40
-            if fault == 'wrong_url': status['url'] += '/forged'
-            if fault == 'missing_creator': status.pop('creator')
-            if fault == 'bad_id': status['id'] = True
-            if fault == 'check_run': status.update(conclusion='success', head_sha=HEAD, app={'id': 42})
-            if fault == 'latest_adverse': return [[{**status, 'id': 10, 'state': 'failure'}], [status]]
-            if fault == 'latest_foreign': return [[{**status, 'id': 10, 'creator': {'login': 'other'}}], [status]]
-            statuses = [status]
-            if self.server == 'status_impersonation':
-                statuses += [{**status, 'id': i, 'context': name} for i, name in [(11, 'hosted'), (12, 'protected')]]
-            return [statuses]
+            return self.statuses()
         if '/pulls/' in endpoint:
             return {'head': {'sha': 'c'*40 if self.checked and fault == 'head_change' else HEAD},
                     'base': {'ref': 'develop' if self.checked and fault == 'base_ref' else 'main',
                              'sha': 'd'*40 if self.checked and fault == 'base_change' else 'f'*40}, 'state': 'open'}
         raise AssertionError(endpoint)
+
+    def statuses(self):
+        fault = self.fault
+        self.checked = True
+        status = {'id': 9, 'context': 'local-gate', 'state': fault if fault in ('pending', 'failure', 'error') else 'success',
+                  'creator': {'login': 'other' if fault == 'wrong_creator' else 'dannydeleteo'},
+                  'url': f'https://api.github.com/repos/{REPO}/statuses/{HEAD}'}
+        if fault in ('missing', 'check_run_only'):
+            return [[]]
+        if fault == 'wrong_head': status['sha'] = 'c'*40
+        if fault == 'wrong_url': status['url'] += '/forged'
+        if fault == 'missing_creator': status.pop('creator')
+        if fault == 'bad_id': status['id'] = True
+        if fault == 'check_run': status.update(conclusion='success', head_sha=HEAD, app={'id': 42})
+        if fault == 'latest_adverse': return [[{**status, 'id': 10, 'state': 'failure'}], [status]]
+        if fault == 'latest_foreign': return [[{**status, 'id': 10, 'creator': {'login': 'other'}}], [status]]
+        statuses = [status]
+        if self.server == 'status_impersonation':
+            statuses += [{**status, 'id': i, 'context': name} for i, name in [(11, 'hosted'), (12, 'protected')]]
+        return [statuses]
 
 
 def test_exact_woodshed_schema_requires_typed_reader():
