@@ -27,6 +27,10 @@ class FeatureUnavailable(RuntimeError):
 class MissingPolicy(FeatureUnavailable):
     """The accepted policy file is absent, not malformed or unauthorized."""
 
+    def __init__(self, message: str, *, base_sha: str, pr_base_sha: str):
+        super().__init__(message)
+        self.accepted_default_pin = {"base_sha": base_sha, "pr_base_sha": pr_base_sha}
+
 
 def owner_local_policy_candidate(repo: str) -> bool:
     """The owner's current/future projects; never a third-party exemption."""
@@ -117,7 +121,8 @@ def repository_policy(api, repo: str, number: int, sha: str, branch: str, profil
         item = api(endpoint, profile_home=profile_home)
     except RuntimeError as exc:
         if getattr(exc, "http_status", None) == 404:
-            raise MissingPolicy("Accepted repository CI policy is missing.") from None
+            raise MissingPolicy("Accepted repository CI policy is missing.",
+                                base_sha=base_sha, pr_base_sha=pr_base_sha) from None
         raise
     try:
         if (item["type"] != "file" or item["encoding"] != "base64" or item["path"] != POLICY_PATH

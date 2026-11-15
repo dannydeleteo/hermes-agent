@@ -124,6 +124,36 @@ def test_missing_owner_policy_does_not_erase_genuine_server_checks(monkeypatch):
     assert 'required_policy' not in result
 
 
+@pytest.mark.parametrize('movement', [None, 'commit', 'default_branch'])
+def test_missing_optional_policy_retains_default_pin_until_after_status_collection(monkeypatch, movement):
+    repo = 'dannydeleteo/agent-bridge'
+    api = ProjectGitHub(repo, fault='server_check', readable_rules=True)
+    collected_statuses = False
+
+    def missing_then_move(endpoint, **kwargs):
+        nonlocal collected_statuses
+        if '/contents/' in endpoint:
+            raise gate._GateAuthError('Synthetic missing accepted file', http_status=404)
+        if '/statuses?' in endpoint:
+            collected_statuses = True
+        value = api(endpoint, **kwargs)
+        if collected_statuses and movement == 'commit' and '/git/ref/heads/' in endpoint:
+            value['object']['sha'] = 'e' * 40  # This accepted commit adds the local-gate policy.
+        if collected_statuses and movement == 'default_branch' and endpoint == f'repos/{repo}':
+            value['default_branch'] = 'new-default'
+        return value
+
+    monkeypatch.setattr(gate, '_api', missing_then_move)
+    result = gate.collect_acceptance(repo, f'https://github.com/{repo}/pull/7')
+    assert collected_statuses
+    assert result['ok'] is (movement is None), result
+    if movement is None:
+        assert {check['name'] for check in result['checks']} == {'python'}
+        assert 'required_policy' not in result
+    else:
+        assert result['classification'] in {'stale', 'feature_unavailable'}, result
+
+
 def test_no_declaration_no_server_checks_is_never_a_pass(monkeypatch):
     repo='dannydeleteo/agent-bridge'
     api=ProjectGitHub(repo, readable_rules=True)
