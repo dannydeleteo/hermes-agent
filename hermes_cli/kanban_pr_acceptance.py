@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-from hermes_cli.kanban_pr_requirements import FeatureUnavailable, PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, repository_policy
+from hermes_cli.kanban_pr_requirements import FeatureUnavailable, MissingPolicy, PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, owner_local_policy_candidate, repository_policy
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -149,11 +149,26 @@ def collect_acceptance(contract: str, published_pr: str | None,
         except FeatureUnavailable:
             required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
             required.update(from_rules(protection, []))
-        # Both declarations apply even when plan rules become readable. Woodshed
-        # has no advisory exemption; union every real server requirement.
-        if repo in {PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO} and "required_policy" not in receipt:
-            declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
-            required.update(declared)
+        # Accepted owner declarations apply even when rules become readable.
+        # Missing optional declarations cannot erase genuine server requirements;
+        # malformed declarations never fall back, and empty evidence never passes.
+        if owner_local_policy_candidate(repo) and "required_policy" not in receipt:
+            metadata = _api(f"repos/{repo}", profile_home=profile_home)
+            default_branch = metadata.get("default_branch")
+            if not isinstance(default_branch, str) or not default_branch:
+                raise ValueError("Accepted default branch is unavailable")
+            # Stacked targets retain their real server gate; never load a policy
+            # from an author-controlled feature branch as fallback authority.
+            if branch == default_branch:
+                try:
+                    declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
+                except MissingPolicy as exc:
+                    if not required or repo in {PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO}:
+                        raise
+                    # Absence is evidence at a particular accepted commit, too.
+                    receipt["accepted_default_pin"] = exc.accepted_default_pin
+                else:
+                    required.update(declared)
         commit_statuses = receipt.get("required_policy", {}).get("commit_statuses", {})
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
@@ -198,10 +213,11 @@ def collect_acceptance(contract: str, published_pr: str | None,
                     **({"kind": "commit_status", "creator_login": (check.get("creator") or {}).get("login")} if status_creator else {})})
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
+        policy_pin = receipt.get("required_policy") or receipt.get("accepted_default_pin")
         if (current["head"]["sha"] != sha or current["base"]["ref"] != branch
-                or (receipt.get("required_policy") and (
-                    current["base"].get("sha") != receipt["required_policy"]["pr_base_sha"]
-                    or accepted_branch_sha(_api, repo, branch, profile_home) != receipt["required_policy"]["base_sha"]))
+                or (policy_pin and (
+                    current["base"].get("sha") != policy_pin["pr_base_sha"]
+                    or accepted_branch_sha(_api, repo, branch, profile_home) != policy_pin["base_sha"]))
                 or (current["state"] == "closed" and not current.get("merged"))):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
