@@ -76,5 +76,6 @@ owner-repository reads using the already configured Git credential helper. The
 helper runs outside the worktree, with interaction disabled. Its credential is
 passed only in the child process environment and GitHub must confirm the owner
 identity first. Configured profile credentials are never replaced. No broader
-token, plaintext credential copy or subscription is created. Unassigned cards
-retain their standard gh login.
+token, plaintext credential copy or subscription is created. Same-profile workers
+and unassigned cards preserve any configured standard gh login; only a confirmed
+empty gh identity configuration permits the same owner fallback.

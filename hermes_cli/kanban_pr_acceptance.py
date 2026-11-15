@@ -5,7 +5,7 @@ receipts only after rechecking the captured run/status/contract under its lock.
 
 ``gh`` runs as the card's assignee profile (``profile_home``), not the ambient
 login: :func:`_gh_env` resolves that profile's own credentials/config for the
-subprocess â€” a multi-profile host's default ``gh`` login cannot read another
+subprocess -- a multi-profile host's default ``gh`` login cannot read another
 org's private repos (#122689).
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
 
 class _GateAuthError(RuntimeError):
     """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
-    this profile's login cannot see the repo â€” an identity problem to fix, not
+    this profile's login cannot see the repo -- an identity problem to fix, not
     an infrastructure blip to retry."""
 
     def __init__(self, message: str, *, http_status: int | None = None):
@@ -82,7 +82,7 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     is the seam for "this child acts for that profile": it scrubs the launch
     profile's credential residue and overlays the target profile's own
     ``GH_TOKEN``/``GH_CONFIG_DIR`` (its ``.env`` + external secret sources).
-    ``None`` keeps the ambient env â€” unassigned cards behave exactly as before.
+    ``None`` keeps the ambient env -- unassigned cards behave exactly as before.
     """
     if not profile_home:
         return None
@@ -96,15 +96,15 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     env = served_profile_child_env(base=base, target_home=profile_home, inherit_credentials=True)
     if routed and not (env.keys() & {"GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR"}):
         # HOME/XDG_CONFIG_HOME are still the launch process's: without a login of its own the
-        # child would fall through to ~/.config/gh/hosts.yml â€” the ambient login. Pin gh's config
+        # child would fall through to ~/.config/gh/hosts.yml -- the ambient login. Pin gh's config
         # to a profile-owned dir so it fails "not logged in" (exit 4 -> auth) instead.
         env["GH_CONFIG_DIR"] = str(Path(profile_home) / "gh")
     return env
 
 
 def _assignee_profile_home(assignee: str | None) -> str | None:
-    """Home whose ``gh`` login must read the contract repo â€” the assignee's, resolved
-    exactly as the dispatcher resolves the worker's home â€” or None (unassigned) so the
+    """Home whose ``gh`` login must read the contract repo -- the assignee's, resolved
+    exactly as the dispatcher resolves the worker's home -- or None (unassigned) so the
     ambient login is used. An assigned card whose profile cannot be resolved is an
     identity failure (``auth``), never a silent fall-through to the ambient login."""
     if not assignee:

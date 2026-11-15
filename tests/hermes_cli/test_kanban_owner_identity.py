@@ -34,7 +34,7 @@ def test_existing_credential_used_only_in_child_memory(owner, monkeypatch):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("reason", ["other_repo", "token", "github_token", "existing_login", "no_config", "no_policy"])
+@pytest.mark.parametrize("reason", ["other_repo", "token", "github_token", "existing_login", "no_policy"])
 def test_no_fallback_without_explicit_route(owner, monkeypatch, tmp_path, reason):
     endpoint = "repos/dannydeleteo/agent-bridge"
     if reason == "other_repo":
@@ -47,8 +47,6 @@ def test_no_fallback_without_explicit_route(owner, monkeypatch, tmp_path, reason
         config = tmp_path / "profile" / "gh"
         config.mkdir(parents=True)
         (config / "hosts.yml").write_text("existing login")
-    if reason == "no_config":
-        owner.clear()
     if reason == "no_policy":
         (tmp_path / local.POLICY_FILE).unlink()
 
@@ -57,6 +55,25 @@ def test_no_fallback_without_explicit_route(owner, monkeypatch, tmp_path, reason
 
     monkeypatch.setattr(identity.subprocess, "run", forbidden)
     assert identity.owner_credential_env(owner, endpoint) is owner
+
+
+@pytest.mark.parametrize("hosts,uses_helper", [({}, True), ({"github.com": [{"login": "another-profile"}]}, False)])
+def test_same_profile_worker_respects_standard_login(owner, monkeypatch, hosts, uses_helper):
+    owner.clear()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if "auth" in command:
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"hosts": hosts}))
+        if command[:3] == ["git", "credential", "fill"]:
+            return SimpleNamespace(returncode=0, stdout="password=fictional-token\n")
+        return SimpleNamespace(returncode=0, stdout="dannydeleteo\n")
+
+    monkeypatch.setattr(identity.subprocess, "run", run)
+    result = identity.owner_credential_env(owner, "repos/dannydeleteo/agent-bridge")
+    assert (result.get("GH_TOKEN") == "fictional-token") is uses_helper
+    assert len(calls) == (3 if uses_helper else 1)
 
 
 @pytest.mark.parametrize("failure", ["credential_failure", "missing_token", "wrong_owner", "probe_failure"])
