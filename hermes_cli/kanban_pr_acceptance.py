@@ -5,7 +5,7 @@ receipts only after rechecking the captured run/status/contract under its lock.
 
 ``gh`` runs as the card's assignee profile (``profile_home``), not the ambient
 login: :func:`_gh_env` resolves that profile's own credentials/config for the
-subprocess — a multi-profile host's default ``gh`` login cannot read another
+subprocess -- a multi-profile host's default ``gh`` login cannot read another
 org's private repos (#122689).
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-from hermes_cli.kanban_pr_requirements import FeatureUnavailable, PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, repository_policy
+from hermes_cli.kanban_pr_requirements import FeatureUnavailable, MissingPolicy, PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO, accepted_branch_sha, from_rules, is_plan_restriction, owner_local_policy_candidate, repository_policy
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -32,15 +32,19 @@ def validate_contract(value: str | None) -> str:
 
 def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
          profile_home: str | None = None):
-    command = ["gh", "api", endpoint, "--hostname", "github.com"]
+    from hermes_platform.resolver.github import github_cli
+    executable = github_cli().command or ("gh",)
+    command = [*executable, "api", endpoint, "--hostname", "github.com"]
     if query is not None:
         command += ["-f", "query=" + query]
     if paginate:
         command += ["--paginate", "--slurp"]
+    from hermes_cli.kanban_owner_identity import owner_credential_env
+    env = owner_credential_env(_gh_env(profile_home), endpoint, query)
     try:
         result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=30,
-                                check=True, env=_gh_env(profile_home))
+                                check=True, env=env)
     except subprocess.CalledProcessError as exc:
         # 401/403/404 = the login cannot see this repository (wrong profile identity
         # or missing grant), not a transient API failure. Persist only the status
@@ -61,7 +65,7 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
 
 class _GateAuthError(RuntimeError):
     """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
-    this profile's login cannot see the repo — an identity problem to fix, not
+    this profile's login cannot see the repo -- an identity problem to fix, not
     an infrastructure blip to retry."""
 
     def __init__(self, message: str, *, http_status: int | None = None):
@@ -78,7 +82,7 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     is the seam for "this child acts for that profile": it scrubs the launch
     profile's credential residue and overlays the target profile's own
     ``GH_TOKEN``/``GH_CONFIG_DIR`` (its ``.env`` + external secret sources).
-    ``None`` keeps the ambient env — unassigned cards behave exactly as before.
+    ``None`` keeps the ambient env -- unassigned cards behave exactly as before.
     """
     if not profile_home:
         return None
@@ -92,15 +96,15 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     env = served_profile_child_env(base=base, target_home=profile_home, inherit_credentials=True)
     if routed and not (env.keys() & {"GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR"}):
         # HOME/XDG_CONFIG_HOME are still the launch process's: without a login of its own the
-        # child would fall through to ~/.config/gh/hosts.yml — the ambient login. Pin gh's config
+        # child would fall through to ~/.config/gh/hosts.yml -- the ambient login. Pin gh's config
         # to a profile-owned dir so it fails "not logged in" (exit 4 -> auth) instead.
         env["GH_CONFIG_DIR"] = str(Path(profile_home) / "gh")
     return env
 
 
 def _assignee_profile_home(assignee: str | None) -> str | None:
-    """Home whose ``gh`` login must read the contract repo — the assignee's, resolved
-    exactly as the dispatcher resolves the worker's home — or None (unassigned) so the
+    """Home whose ``gh`` login must read the contract repo -- the assignee's, resolved
+    exactly as the dispatcher resolves the worker's home -- or None (unassigned) so the
     ambient login is used. An assigned card whose profile cannot be resolved is an
     identity failure (``auth``), never a silent fall-through to the ambient login."""
     if not assignee:
@@ -112,11 +116,42 @@ def _assignee_profile_home(assignee: str | None) -> str | None:
         raise _GateAuthError(f"assignee profile {assignee!r} cannot be resolved") from None
 
 
+
+def _required_checks(repo, number, sha, branch, profile_home, pr, receipt):
+    """Combine accepted owner policy with every genuine server requirement."""
+    protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
+    try:
+        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
+                     paginate=True, profile_home=profile_home)
+        required = from_rules(protection, rules)
+    except FeatureUnavailable:
+        required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
+        required.update(from_rules(protection, []))
+    # Accepted owner declarations apply even when rules become readable.
+    # Missing optional declarations cannot erase genuine server requirements;
+    # malformed declarations never fall back, and empty evidence never passes.
+    if owner_local_policy_candidate(repo) and "required_policy" not in receipt:
+        metadata = _api(f"repos/{repo}", profile_home=profile_home)
+        default_branch = metadata.get("default_branch")
+        if not isinstance(default_branch, str) or not default_branch:
+            raise ValueError("Accepted default branch is unavailable")
+        # Stacked targets retain their real server gate; never load a policy
+        # from an author-controlled feature branch as fallback authority.
+        if branch == default_branch:
+            try:
+                declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
+            except MissingPolicy:
+                if not required or repo in {PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO}:
+                    raise
+            else:
+                required.update(declared)
+    return required
+
 def collect_acceptance(contract: str, published_pr: str | None,
                        assignee: str | None = None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
                "pr_url": published_pr, "checks": [],
-               "recovery": "Fix required failures, rerun infrastructure checks or wait, then retry completion. "
+               "recovery": "Fix required failures, use independent local review and the canonical local gate for billing refusals, then retry completion. "
                            "Use kanban_block if human input is needed; receipts remain on the task event log."}
     try:
         profile_home = _assignee_profile_home(assignee)
@@ -129,9 +164,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
         owner, name = repo.split("/")
-        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state
-            baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}''' % (
-                json.dumps(owner), json.dumps(name), number)
+        query = (f'{{repository(owner:{json.dumps(owner)},name:{json.dumps(name)})'
+                 f'{{pullRequest(number:{number})'
+                 '{headRefOid baseRefName state baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}')
         repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
         if repository is None:
             # A private repo the login cannot read resolves to null, not an error.
@@ -141,19 +176,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
         receipt["head_sha"] = sha
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or pr["state"] not in {"OPEN", "MERGED"}:
             raise ValueError("PR is closed or current head is unavailable")
-        protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
-        try:
-            rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                         paginate=True, profile_home=profile_home)
-            required = from_rules(protection, rules)
-        except FeatureUnavailable:
-            required, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
-            required.update(from_rules(protection, []))
-        # Both declarations apply even when plan rules become readable. Woodshed
-        # has no advisory exemption; union every real server requirement.
-        if repo in {PM_LOCAL_STATUS_REPO, WOODSHED_LOCAL_STATUS_REPO} and "required_policy" not in receipt:
-            declared, receipt["required_policy"] = repository_policy(_api, repo, number, sha, branch, profile_home, allow_commit_status=True)
-            required.update(declared)
+        required = _required_checks(repo, number, sha, branch, profile_home, pr, receipt)
         commit_statuses = receipt.get("required_policy", {}).get("commit_statuses", {})
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
@@ -197,8 +220,10 @@ def collect_acceptance(contract: str, published_pr: str | None,
                     "classification": classification, "conclusion": outcome,
                     **({"kind": "commit_status", "creator_login": (check.get("creator") or {}).get("login")} if status_creator else {})})
         # Re-read after all pages: old-head successes are never transferable.
+        from hermes_cli.kanban_pr_local_policy import policy_is_current
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
         if (current["head"]["sha"] != sha or current["base"]["ref"] != branch
+                or not policy_is_current(receipt.get("required_policy", {}))
                 or (receipt.get("required_policy") and (
                     current["base"].get("sha") != receipt["required_policy"]["pr_base_sha"]
                     or accepted_branch_sha(_api, repo, branch, profile_home) != receipt["required_policy"]["base_sha"]))

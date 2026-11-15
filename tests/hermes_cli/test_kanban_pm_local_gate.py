@@ -60,23 +60,27 @@ class GitHub:
                    'head_sha': HEAD, 'status': 'completed', 'conclusion': 'success'}
             return [{'total_count': 1, 'check_runs': [run]}]
         if '/statuses?' in endpoint:
-            self.checked = True
-            if self.race: self.race()
-            if fault in ('missing', 'check_run_only'):
-                return [[]]
-            status = {'id': 9, 'context': 'local-gate', 'state': fault if fault in ('pending','failure','error') else 'success',
-                      'creator': {'login': 'other' if fault == 'wrong_creator' else 'dannydeleteo'},
-                      'url': f'https://api.github.com/repos/{REPO}/statuses/{HEAD}'}
-            if fault == 'wrong_head': status['sha'] = 'c'*40
-            if fault == 'wrong_url': status['url'] = f'https://api.github.com/repos/{REPO}/statuses/'+'c'*40
-            if fault == 'forged_check_run': status.update(conclusion='success', app={'id':15368}, head_sha=HEAD)
-            if fault == 'missing_creator': status.pop('creator')
-            if fault == 'latest_failure': return [[status, {**status, 'id':10, 'state':'failure'}]]
-            return [[status]]
+            return self.statuses()
         if '/pulls/' in endpoint:
             return {'head': {'sha': 'c'*40 if self.checked and fault == 'head_change' else HEAD},
                     'base': {'ref': 'main', 'sha': 'd'*40 if self.checked and fault == 'base_change' else 'f'*40}, 'state':'open'}
         raise AssertionError(endpoint)
+
+    def statuses(self):
+        fault = self.fault
+        self.checked = True
+        if self.race: self.race()
+        if fault in ('missing', 'check_run_only'):
+            return [[]]
+        status = {'id': 9, 'context': 'local-gate', 'state': fault if fault in ('pending','failure','error') else 'success',
+                  'creator': {'login': 'other' if fault == 'wrong_creator' else 'dannydeleteo'},
+                  'url': f'https://api.github.com/repos/{REPO}/statuses/{HEAD}'}
+        if fault == 'wrong_head': status['sha'] = 'c'*40
+        if fault == 'wrong_url': status['url'] = f'https://api.github.com/repos/{REPO}/statuses/'+'c'*40
+        if fault == 'forged_check_run': status.update(conclusion='success', app={'id':15368}, head_sha=HEAD)
+        if fault == 'missing_creator': status.pop('creator')
+        if fault == 'latest_failure': return [[status, {**status, 'id':10, 'state':'failure'}]]
+        return [[status]]
 
 
 @pytest.mark.parametrize('readable_rules', [False, True])
