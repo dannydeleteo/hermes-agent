@@ -1636,9 +1636,8 @@ def link_tasks(
     *,
     expected_child_run_id: Optional[int] = None,
 ) -> bool:
-    """Link ``parent_id -> child_id``. Returns True when the link gated a
-    ``ready`` child back to ``todo`` (the new parent is not yet terminal), so
-    callers can surface the demotion instead of a silent status flip.
+    """Link ``parent_id -> child_id``. Returns True when an unfinished parent
+    moves a ready child or a proven dependency hold to ``todo``.
 
     A running child cannot normally be gated retroactively, so reject the edge
     rather than record a dependency that did not constrain the active run. The
@@ -1671,12 +1670,15 @@ def link_tasks(
                 (child_id,),
             )
             gated = cur.rowcount == 1
+            if not gated and child["status"] == "blocked":
+                gated = _queue_late_dependency(conn, child_id)
             if gated:
                 _append_event(
                     conn,
                     child_id,
                     "dependency_wait",
-                    {"reason": "parent_not_done", "demoted": True, "parent": parent_id},
+                    {"reason": "parent_not_done", "demoted": True, "parent": parent_id,
+                     **({"previous_status": "blocked"} if child["status"] == "blocked" else {})},
                 )
         _append_event(
             conn,
@@ -1686,6 +1688,39 @@ def link_tasks(
         )
         _inherit_notify_subs(conn, child_id, (parent_id,))
     return gated
+
+
+def _queue_late_dependency(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Resolve only the needs_input fallback of a failed dependency handoff.
+
+    Called inside the link transaction after an unfinished parent is verified.
+    This is not an operator reset: live claims, failed runs, review holds and
+    explicit owner requests are left in place.
+    """
+    event = conn.execute(
+        "SELECT payload,created_at FROM task_events WHERE task_id=? AND kind='blocked' "
+        "ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    if not event:
+        return False
+    payload = _json_dict(event["payload"])
+    if (payload.get("requested_kind") != "dependency"
+            or payload.get("rekind_reason") != "no_open_parent"
+            or payload.get("source_status") not in ("ready", "running")
+            or "FOR COREY:" in str(payload.get("reason") or "").upper()
+            or conn.execute(
+                "SELECT 1 FROM task_comments WHERE task_id=? AND created_at>=? "
+                "AND ltrim(body) LIKE 'FOR COREY:%' LIMIT 1",
+                (task_id, event["created_at"]),
+            ).fetchone()):
+        return False
+    return conn.execute(
+        "UPDATE tasks SET status='todo', block_kind='dependency' WHERE id=? "
+        "AND status='blocked' AND block_kind='needs_input' AND claim_lock IS NULL "
+        "AND worker_pid IS NULL AND current_run_id IS NULL "
+        "AND COALESCE(consecutive_failures,0)=0 AND last_failure_error IS NULL",
+        (task_id,),
+    ).rowcount == 1
 
 
 def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
