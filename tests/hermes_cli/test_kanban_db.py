@@ -551,6 +551,30 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
+def test_old_crash_text_cannot_block_a_newer_native_dependency_handoff(kanban_home):
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="prerequisite", assignee="a")
+        child = kb.create_task(conn, title="work", assignee="a")
+        assert kb.claim_task(conn, child)
+        first = kb.get_task(conn, child).current_run_id
+        failure = "ChatGPT or Codex Subscription rejected this request as malformed"
+        conn.execute("UPDATE task_runs SET outcome='crashed', status='crashed', ended_at=?, error=? WHERE id=?",
+                     (5_000_000, failure, first))
+        conn.execute("UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL, "
+                     "claim_expires=NULL, last_failure_error=? WHERE id=?", (failure, child))
+        conn.commit()
+        assert kb.claim_task(conn, child)
+        later = kb.get_task(conn, child).current_run_id
+        kb.link_tasks(conn, parent, child, expected_child_run_id=later)
+        assert kb.block_task(conn, child, reason="wait for prerequisite", kind="dependency", expected_run_id=later)
+        assert kb.get_task(conn, child).status == "todo"
+        assert kb.complete_task(conn, parent, summary="verified prerequisite")
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, child).status == "ready"
+        assert kb.get_task(conn, child).last_failure_error == failure
+        assert kbd.check_respawn_guard(conn, child) is None
+
+
 def test_infrastructure_spawn_refusal_never_charges_the_card(
     kanban_home, monkeypatch, all_assignees_spawnable,
 ):
@@ -1394,6 +1418,24 @@ def test_link_tasks_rejects_unowned_running_child_without_recording_edge(kanban_
         assert "linked" not in [event.kind for event in kb.list_events(conn, child)]
 
 
+def test_late_link_requeues_only_a_dependency_hold(kanban_home):
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="prerequisite", assignee="a")
+        dependent = kb.create_task(conn, title="wait for teammate", assignee="b")
+        owner = kb.create_task(conn, title="wait for owner", assignee="b")
+        assert kb.block_task(conn, dependent, kind="dependency", reason="need the earlier card")
+        assert kb.block_task(conn, owner, kind="needs_input", reason="FOR COREY: interactive sign-in")
+        assert kb.get_task(conn, dependent).status == "blocked"
+        assert kb.link_tasks(conn, parent, dependent)
+        assert not kb.link_tasks(conn, parent, owner)
+        assert kb.get_task(conn, dependent).status == "todo"
+        assert kb.get_task(conn, owner).status == "blocked"
+        assert kb.complete_task(conn, parent, summary="saved output")
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, dependent).status == "ready"
+        assert kb.get_task(conn, owner).status == "blocked"
+
+
 def test_link_tasks_no_dependency_wait_when_parent_done(kanban_home):
     """A done parent demotes nothing and reports no gate."""
     with kbc.connect() as conn:
@@ -1653,6 +1695,8 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
             captured["env"] = kwargs.get("env", {})
             self.pid = 4242
 
+    import subprocess
+    original_popen = subprocess.Popen
     monkeypatch.setattr("subprocess.Popen", _FakePopen)
 
     task = kb.Task(
@@ -1665,6 +1709,20 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
     monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: [sys.executable, "-m", "hermes_cli.main"])
     kbd._default_spawn(task, str(tmp_path / "ws"))
     assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
+
+    # Run the real module entry point from a worktree containing a different checkout's package.
+    from subprocess import run
+    workspace = tmp_path / "ws"
+    shadow = workspace / "hermes_cli"
+    shadow.mkdir(parents=True)
+    (shadow / "__init__.py").write_text("raise RuntimeError('wrong checkout imported')\n")
+    env = {key: captured["env"][key] for key in ("PYTHONPATH", "PYTHONSAFEPATH", "HERMES_HOME")
+           if key in captured["env"]}
+    with monkeypatch.context() as m:
+        m.setattr("subprocess.Popen", original_popen)
+        reply = run([sys.executable, "-m", "hermes_cli.main", "--version"], cwd=workspace,
+                    env={**env, "PATH": os.defpath}, capture_output=True, text=True, timeout=30)
+    assert reply.returncode == 0, reply.stderr
 
     monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["/opt/hermes/bin/hermes"])
     kbd._default_spawn(task, str(tmp_path / "ws"))

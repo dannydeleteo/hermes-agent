@@ -1559,9 +1559,9 @@ def check_respawn_guard(
     #    reaches the breaker.
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
     latest_run = conn.execute(
-        "SELECT outcome, ended_at, metadata FROM task_runs "
+        "SELECT id, outcome, ended_at, metadata, error FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC LIMIT 1",
+        "ORDER BY ended_at DESC, id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
     if latest_run is not None and latest_run["outcome"] == "spawn_failed":
@@ -1589,7 +1589,18 @@ def check_respawn_guard(
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
     if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
-        return "blocker_auth"
+        # A healthy newer run can end by explicitly waiting for a prerequisite.
+        # Its normal handoff must not promote a past crash's captured stdout
+        # into a current auth diagnosis. Keep the recorded failure and all
+        # other guards, including current auth failures.
+        dependency_handoff = (latest_outcome == "blocked" and not latest_run["error"]
+                              and conn.execute(
+                                  "SELECT 1 FROM task_events WHERE task_id = ? AND run_id = ? "
+                                  "AND kind = 'dependency_wait' LIMIT 1",
+                                  (task_id, latest_run["id"]),
+                              ).fetchone())
+        if not dependency_handoff:
+            return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
     # are the canonical *inputs* to a review handoff, not duplicate-work signals.
@@ -2513,6 +2524,9 @@ def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
 
     pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parents[1])
+    # A worktree may contain a different hermes_cli; -m normally inserts the
+    # working directory ahead of even the pinned PYTHONPATH.
+    env["PYTHONSAFEPATH"] = "1"
 
 
 def _absolute_hermes_path(path: str) -> str:
