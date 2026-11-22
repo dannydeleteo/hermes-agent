@@ -56,6 +56,19 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('mode', ['complete', 'timeout', 'rate_limit', 'billing', 'crash'])
 def test_real_dispatcher_lifecycle(tmp_path, mode):
+    _real_dispatcher_lifecycle(tmp_path, mode)
+
+
+@pytest.mark.parametrize('workspace_package', ['missing-client', 'different-client'])
+def test_real_dispatcher_uses_runtime_client_in_foreign_workspace(tmp_path, workspace_package):
+    receipt = _real_dispatcher_lifecycle(tmp_path, 'complete', workspace_package)
+    assert receipt is not None
+    workspace = str(tmp_path / 'state' / 'workspace')
+    assert receipt['client_cwd'] == receipt['terminal_cwd'] == workspace
+    assert receipt['run_events'] == {'owner_admitted': 1, 'worker_bound': 1, 'worker_result': 1}
+
+
+def _real_dispatcher_lifecycle(tmp_path, mode, workspace_package=''):
     import os
     import subprocess
     import sys
@@ -63,6 +76,7 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
     from tests.gateway.fixtures.local_recovery_probe import child_env
     env = child_env()
     env.update(HOME=str(tmp_path / 'home'), USERPROFILE=str(tmp_path / 'home'), HERMES_HOME=str(tmp_path / 'state'), PYTHONPATH=str(repo), KANBAN_PROBE_MODE=mode)
+    env['KANBAN_PROBE_WORKSPACE_PACKAGE'] = workspace_package
     result = subprocess.run([sys.executable, str(Path(__file__).parent / 'fixtures' / 'kanban_owner_probe.py')],
         env=env, cwd=repo, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=150, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -75,7 +89,7 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
     assert receipt['tools'] and receipt['task_context'] and receipt['skill_context'] and receipt['hook_effect']
     assert receipt['admissions'] == 1 and receipt['retry_same_session']
     assert receipt['goal_continuation'] and receipt['stable_prefix']
-    print(json.dumps(receipt))
+    return receipt
 
 
 def test_late_launcher_cannot_stamp_replacement_claim(tmp_path, monkeypatch):

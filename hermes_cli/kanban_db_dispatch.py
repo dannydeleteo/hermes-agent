@@ -2718,7 +2718,8 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
     """The profile owner executes; this subprocess only waits for its receipt."""
     import sys
-    return [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+    # Keep the workload cwd without letting -m put its checkout ahead of the runtime.
+    return [sys.executable, "-P", "-m", "hermes_cli.kanban_worker_client"]
 
 
 def _open_worker_log(task: Task, board: Optional[str]):
@@ -2887,6 +2888,11 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # died on `No module named 'hermes_cli'` before it ever reached the owner. Same pin as cron's
     # external worker (#112729): applied to the sanitized env, after every other decision stands.
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
+    # Relative entries would be reinterpreted against the task's cwd, defeating -P.
+    if "PYTHONPATH" in env:
+        absolute_entries = [p for p in env.pop("PYTHONPATH").split(os.pathsep) if os.path.isabs(p)]
+        if absolute_entries:
+            env["PYTHONPATH"] = os.pathsep.join(absolute_entries)
     env = pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parent.parent)
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
