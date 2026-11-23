@@ -73,6 +73,14 @@ def main():
     os.environ.update(OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
     workspace = home / 'workspace'
     workspace.mkdir(exist_ok=True)
+    workspace_package = os.environ.get('KANBAN_PROBE_WORKSPACE_PACKAGE')
+    if workspace_package:
+        package = workspace / 'hermes_cli'
+        package.mkdir()
+        (package / '__init__.py').write_text('', encoding='utf-8')
+        if workspace_package == 'different-client':
+            (package / 'kanban_worker_client.py').write_text(
+                'raise SystemExit("workspace client selected")\n', encoding='utf-8')
     skill = home / 'skills' / 'owned-skill'
     skill.mkdir(parents=True)
     (skill / 'SKILL.md').write_text('---\nname: owned-skill\ndescription: Owned fixture\n---\nKANBAN_SKILL_SENTINEL\n', encoding='utf-8')
@@ -102,6 +110,7 @@ def main():
         child = original_popen(*args, **kwargs)
         if 'hermes_cli.kanban_worker_client' in args[0]:
             clients.append(child)
+            receipt.update(client_cwd=kwargs['cwd'], terminal_cwd=kwargs['env'].get('TERMINAL_CWD'))
             if peer.mode == 'timeout':
                 assert peer.blocked.wait(55), 'managed worker did not reach loopback'
                 with closing(connect(board='owned')) as snapshot:
@@ -125,7 +134,11 @@ def main():
                     assert [s[0] for s in launched.spawned] == [tid], launched
                     task = kb.get_task(conn, tid)
                     params = dict(task_id=tid, board='owned', run_id=task.current_run_id, claim_lock=task.claim_lock)
-                    assert peer.blocked.wait(55), 'model never reached'
+                    deadline = time.monotonic() + 55
+                    while not peer.blocked.wait(.05):
+                        if not kb._pid_alive(clients[0].pid) or time.monotonic() >= deadline:
+                            log = kb.worker_logs_dir(board='owned') / f'{tid}.log'
+                            raise AssertionError('worker did not reach loopback: ' + log.read_text())
                     active = kb.get_task(conn, tid)
                     receipt.update(client_pid=clients[0].pid, stored_pid=active.worker_pid, run_id=task.current_run_id)
                     if peer.mode == 'timeout':
@@ -151,6 +164,10 @@ def main():
                     receipt['client_exit'] = dispatch._classify_worker_exit(clients[0].pid)
                     dispatch._recent_worker_exits.clear()
                     swept = dispatch.dispatch_once(conn, board='owned', max_spawn=0)
+                    receipt['run_events'] = dict(conn.execute(
+                        "SELECT kind, count(*) FROM task_events WHERE task_id=? AND run_id=? "
+                        "AND kind IN ('owner_admitted', 'worker_bound', 'worker_result') GROUP BY kind",
+                        (tid, params['run_id'])))
                     task = kb.get_task(conn, tid)
                     run = dict(conn.execute('SELECT * FROM task_runs WHERE id=?', (params['run_id'],)).fetchone())
                     from gateway.session_kanban import worker_exit_code

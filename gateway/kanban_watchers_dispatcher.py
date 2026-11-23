@@ -11,6 +11,7 @@ import contextlib
 import os
 import sqlite3
 import time
+from bisect import bisect_right
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -133,6 +134,7 @@ class _KanbanDispatcher:
         self.kb = kb
         self.settings = settings
         self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
+        self._last_spawn_board: Optional[str] = None
 
     def _board_slugs(self) -> list:
         return _board_slugs(self.kb)
@@ -219,7 +221,23 @@ class _KanbanDispatcher:
 
     def tick_once(self) -> list[tuple[str, Optional[object]]]:
         """Run one dispatch_once per board. Returns (slug, result) pairs."""
-        return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
+        # Keep a slug, not a list index: boards can be added or archived between
+        # ticks. Keep default first in the ring, then use the stable slug order.
+        def order(slug: str) -> tuple[bool, str]:
+            return slug != self.kb.DEFAULT_BOARD, slug
+
+        slugs = sorted(self._board_slugs(), key=order)
+        if self._last_spawn_board is not None:
+            start = bisect_right(slugs, order(self._last_spawn_board), key=order)
+            slugs = slugs[start:] + slugs[:start]
+        results = []
+        for slug in slugs:
+            result = self.tick_once_for_board(slug)
+            results.append((slug, result))
+            # Full, idle and quarantined ticks must not spend the next turn.
+            if getattr(result, "spawned", None):
+                self._last_spawn_board = slug
+        return results
 
     def ready_nonempty(self) -> bool:
         """Is there a ready+assigned+unclaimed task on ANY board the dispatcher would spawn for?
