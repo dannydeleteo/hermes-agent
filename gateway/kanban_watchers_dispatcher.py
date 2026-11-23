@@ -184,6 +184,10 @@ class _KanbanDispatcher:
         if not self._quarantine_lifted(slug, fingerprint):
             return None
         kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
+        # Local patch: install & update mode. Keep the tick's reconcile and promotion
+        # work, but start no new workers while the flag exists.
+        if (Path.home() / ".hermes/state/maintenance.json").exists():
+            kwargs["max_spawn"] = 0
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).

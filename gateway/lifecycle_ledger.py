@@ -61,6 +61,36 @@ def _proc_fields(path: str, wanted: dict[str, str]) -> dict[str, int]:
     return found
 
 
+def _darwin_memory_fields() -> dict[str, Any]:
+    """Local patch (GreekFire, 29 Oct 2026): macOS has no /proc, so the memory
+    guard and the pressure banner read nothing there and the dispatcher spawned
+    into a 51 GB render job (three Jetsam events, one kernel panic). Derive the
+    same fields from ``sysctl hw.memsize``, ``vm_stat`` and ``vm.swapusage``.
+    ``mem_available_kib`` = free + inactive + speculative pages (what the kernel
+    can hand out without swapping)."""
+    import re as _re
+    import subprocess as _sp
+    import sys as _sys
+    if _sys.platform != "darwin":
+        return {}
+    try:
+        total = int(_sp.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout.strip())
+        vm = _sp.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        page = int(_re.search(r"page size of (\d+) bytes", vm).group(1))
+        def pages(label):
+            m = _re.search(r"^%s:\s+(\d+)\." % _re.escape(label), vm, _re.M)
+            return int(m.group(1)) if m else 0
+        avail = (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative")) * page
+        out = {"mem_total_kib": total // 1024, "mem_available_kib": avail // 1024}
+        sw = _sp.run(["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=5).stdout
+        m = _re.search(r"used = ([\d.]+)M", sw)
+        if m:
+            out["swap_used_kib"] = int(float(m.group(1)) * 1024)
+        return out
+    except Exception:
+        return {}
+
+
 def sample_memory() -> dict[str, Any]:
     """Cheap /proc snapshot (KiB): own RSS + MemTotal/MemAvailable + swap used.  Linux-only
     (``{}`` elsewhere), never raises; the 30s heartbeat embeds it so OOM cycles are classifiable."""
@@ -68,6 +98,8 @@ def sample_memory() -> dict[str, Any]:
     mem = _proc_fields("/proc/meminfo", {"MemTotal": "mem_total_kib", "MemAvailable": "mem_available_kib",
                                          "SwapTotal": "SwapTotal", "SwapFree": "SwapFree"})
     swap_total, swap_free = mem.pop("SwapTotal", None), mem.pop("SwapFree", None)
+    if not mem:
+        mem = _darwin_memory_fields()
     sample.update(mem)
     if swap_total is not None and swap_free is not None:
         sample["swap_used_kib"] = swap_total - swap_free

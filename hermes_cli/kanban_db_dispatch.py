@@ -57,6 +57,16 @@ TERMINAL_WORKER_REAP_GRACE_SECONDS = 120
 # also matched ordinary English words like "author"/"authored"/"authoring"/
 # "authoritative" in worker progress prose, parking a healthy card forever
 # (#117009).
+# Local patch (GreekFire, 29 Oct 2026): a worker that never reached the gateway
+# ("Kanban owner refused: Gateway connection failed/timed out; no local fallback")
+# ran nothing of the card. Under host load the gateway loop stalls for >10 s and
+# every worker spawned in that window dies this way; counting those as card
+# failures tripped the breaker on healthy cards. Treated as infrastructure.
+_GATEWAY_UNREACHABLE_RE = re.compile(
+    r"Gateway connection (?:failed|timed out); no local fallback"
+    r"|Gateway disconnected; turn outcome is unknown"
+)
+
 _RESPAWN_BLOCKER_RE = re.compile(
     r"\b(quota|rate[\s_\-]?limit|429|403|"
     r"auth|authenticat(?:e|es|ed|ing|ion)|authoriz(?:e|es|ed|ing|ation)|"
@@ -1298,6 +1308,17 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
+            )
+        elif _GATEWAY_UNREACHABLE_RE.search(error_text or ""):
+            # Local patch (GreekFire, 29 Oct 2026): see _GATEWAY_UNREACHABLE_RE.
+            tripped = _record_task_failure(
+                conn, tid,
+                error=error_text,
+                outcome="crashed",
+                release_claim=False,
+                end_run=False,
+                event_payload_extra={"pid": pid, "claimer": claimer, "gateway_unreachable": True},
+                infrastructure=True,
             )
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
